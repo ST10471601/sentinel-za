@@ -1,0 +1,14 @@
+# Store text with LF line endings in the repo, regardless of OS.
+# Prevents Windows CRLF endings from causing whole-file diffs and formatter churn.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binary files: never touch line endings.
+*.parquet binary
+*.duckdb binary
+*.db binary
+*.png binary
+*.pdf binary
