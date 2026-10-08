@@ -32,31 +32,46 @@ Designed to run on an 8 GB laptop: no local servers, heavy infrastructure tested
 ## Quickstart
 
 ```bash
-uv sync
-uv run sentinel version
-uv run pytest
+uv sync                  # install
+uv run sentinel version  # run the CLI
+uv run poe check         # lint, strict types, architecture rules, tests
 ```
+
+## Engineering standards
+
+Every change must pass `uv run poe check`, locally and in CI:
+
+- **Ruff** linting and formatting, with a complexity cap and docstrings on public code
+- **mypy** in strict mode
+- **import-linter** enforcing the [layered architecture](docs/architecture.md)
+- **pytest** with an 85% coverage gate
 
 ## Project layout
 
 ```
 src/sentinel/
-  simulator/   synthetic SA bank data + fraud injectors
-  broker/      event broker interface (local log, Kafka)
-  ingestion/   consumers that land raw events in bronze
-  features/    shared feature logic (training + live scoring)
-  rules/       YAML-configured rules engine
-  ml/          training, evaluation, explainability
-  scoring/     real-time scoring service
+  cli.py       command-line interface and composition root
   dashboard/   analyst console
+  scoring/     real-time scoring service
+  ml/          training, evaluation, explainability
+  rules/       YAML-configured rules engine
+  features/    shared feature logic (training + live scoring)
+  simulator/   synthetic SA bank data + fraud injectors
+  ingestion/   consumers that land raw events in bronze
+  broker/      event broker interface (local log, Kafka)
+  domain/      business entities and events
+  core/        config, logging, errors, money, time
 analytics/     dbt project (silver → gold)
 docs/          architecture, data model, decisions
-tests/
+tests/         unit/ and integration/
 ```
 
 ## Documentation
 
+- [Architecture](docs/architecture.md): layers and the rules that keep them clean
 - [Data model](docs/data-model.md): entities, ERD, data dictionary, medallion layers
+- [Architecture decision records](docs/adr/README.md): why the system is built this way
+- [Contributing](CONTRIBUTING.md): workflow, code conventions, testing rules
 
 ## Data & privacy
 
