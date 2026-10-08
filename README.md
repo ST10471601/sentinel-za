@@ -1,16 +1,16 @@
-# Sentinel ZA — Real-Time Bank Fraud Detection
+# Sentinel ZA: Real-Time Bank Fraud Detection
 
 [![CI](https://github.com/ST10471601/sentinel-za/actions/workflows/ci.yml/badge.svg)](https://github.com/ST10471601/sentinel-za/actions/workflows/ci.yml)
 
 An end-to-end data platform that simulates a South African bank's transaction flow, injects
 realistic fraud, and detects it in real time.
 
-> **Status:** 🚧 Phase 0 — foundations. Built in public.
+> **Status:** Phase 0 (foundations) complete. Phase 1 (simulator) in progress.
 
 ## The problem
 
 South African banks face growing digital fraud: SIM-swap account takeovers, card-not-present
-fraud, cloned cards, social-engineering scams, money-mule networks, and rapid drains over
+fraud, stolen cards, social-engineering scams, money-mule networks, and rapid drains over
 instant payments. Fraud must be stopped in milliseconds without blocking legitimate customers.
 
 ## What this project does

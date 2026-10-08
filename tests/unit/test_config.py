@@ -3,14 +3,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from sentinel.core.config import BrokerBackend, LogFormat, get_settings
+from sentinel.core.config import BrokerType, LogFormat, get_settings
 from sentinel.core.errors import ConfigurationError
 
 
 def test_defaults_need_no_configuration() -> None:
     settings = get_settings()
     assert settings.seed == 42
-    assert settings.broker is BrokerBackend.LOCAL
+    assert settings.broker is BrokerType.LOCAL
     assert settings.data_dir == Path("data")
     assert settings.log_format is LogFormat.TEXT
 
@@ -20,7 +20,7 @@ def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("SENTINEL_BROKER", "kafka")
     settings = get_settings()
     assert settings.seed == 7
-    assert settings.broker is BrokerBackend.KAFKA
+    assert settings.broker is BrokerType.KAFKA
 
 
 def test_dotenv_file_is_read(tmp_path: Path) -> None:

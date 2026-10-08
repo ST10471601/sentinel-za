@@ -33,9 +33,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sentinel"]
 
-# ---------------------------------------------------------------------------
 # Task runner: `uv run poe <task>` (works the same on Windows and in CI)
-# ---------------------------------------------------------------------------
 [tool.poe.tasks]
 format = { sequence = [{ cmd = "ruff format ." }, { cmd = "ruff check --fix ." }], help = "Auto-format and apply safe lint fixes" }
 lint = { sequence = [{ cmd = "ruff check ." }, { cmd = "ruff format --check ." }], help = "Lint and verify formatting" }
@@ -45,9 +43,7 @@ test = { cmd = "pytest", help = "Run all tests with the coverage gate" }
 test-unit = { cmd = "pytest -m 'not integration' --no-cov", help = "Run fast unit tests only" }
 check = { sequence = ["lint", "typecheck", "arch", "test"], help = "Everything CI runs" }
 
-# ---------------------------------------------------------------------------
 # Ruff: linting + formatting
-# ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
 target-version = "py312"
@@ -88,9 +84,7 @@ ban-relative-imports = "all"
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D"]
 
-# ---------------------------------------------------------------------------
 # mypy: strict static typing
-# ---------------------------------------------------------------------------
 [tool.mypy]
 python_version = "3.12"
 strict = true
@@ -103,9 +97,7 @@ init_forbid_extra = true
 init_typed = true
 warn_required_dynamic_aliases = true
 
-# ---------------------------------------------------------------------------
 # pytest + coverage
-# ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers --cov=sentinel --cov-report=term-missing"
@@ -127,9 +119,7 @@ exclude_also = [
     "if __name__ == .__main__.:",
 ]
 
-# ---------------------------------------------------------------------------
-# import-linter: architecture boundaries (see docs/architecture.md)
-# ---------------------------------------------------------------------------
+# import-linter: architecture boundaries, see docs/architecture.md
 [tool.importlinter]
 root_package = "sentinel"
 include_external_packages = true

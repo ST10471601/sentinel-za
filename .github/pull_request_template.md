@@ -1,15 +1,14 @@
 ## What and why
 
-<!-- One or two sentences. Link the Notion task, e.g. SZ-5. -->
+<!-- One or two sentences. Mention the task, e.g. SZ-5. -->
 
 ## How it was tested
 
-<!-- New or changed tests; anything checked manually. -->
+<!-- Tests added or changed; anything checked by hand. -->
 
 ## Checklist
 
-- [ ] `uv run poe check` passes locally
-- [ ] Tests added or updated for every behaviour change
-- [ ] Docs updated (README, `docs/`, docstrings) where behaviour or usage changed
-- [ ] New ADR added if this changes an architectural decision
-- [ ] No secrets, real personal data or generated data files committed
+- [ ] `uv run poe check` passes
+- [ ] Tests cover the change
+- [ ] Docs updated if behaviour or usage changed
+- [ ] No secrets or generated data committed

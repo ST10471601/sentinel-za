@@ -184,12 +184,12 @@ One row per bank customer (individual or business).
 |---|---|---|---|
 | customer_id | string | | PK. `CUS-0000001` |
 | customer_type | string | | `individual` or `business` |
-| full_name | string | ✔ | Person or registered business name |
-| sa_id_number | string | ✔ | Synthetic 13-digit SA ID number with valid checksum (individuals only) |
-| company_reg_number | string | ✔ | Synthetic CIPC-style registration number (businesses only) |
-| date_of_birth | date | ✔ | Individuals only |
-| phone_number | string | ✔ | `+27…`; also the customer's PayShap ShapID |
-| email | string | ✔ | |
+| full_name | string | yes | Person or registered business name |
+| sa_id_number | string | yes | Synthetic 13-digit SA ID number with valid checksum (individuals only) |
+| company_reg_number | string | yes | Synthetic CIPC-style registration number (businesses only) |
+| date_of_birth | date | yes | Individuals only |
+| phone_number | string | yes | `+27…`; also the customer's PayShap ShapID |
+| email | string | yes | |
 | income_band | string | | `low`, `middle`, `high`, `business`. Drives spending behaviour |
 | income_source | string | | `salary`, `grant`, `business`, `mixed`. Drives payday timing |
 | pay_day | int | | Day of month income usually arrives (e.g. 25; grants early in the month) |
@@ -205,7 +205,7 @@ One row per bank customer (individual or business).
 |---|---|---|---|
 | account_id | string | | PK. `ACC-0000001` |
 | customer_id | string | | FK → customer |
-| account_number | string | ✔ | Synthetic 10–11 digit account number |
+| account_number | string | yes | Synthetic 10–11 digit account number |
 | account_type | string | | `cheque`, `savings`, `credit_card`, `business_current` |
 | opened_at | timestamp | | Recently opened accounts matter for mule detection |
 | status | string | | `active`, `dormant`, `frozen`, `closed` |
@@ -257,7 +257,7 @@ A device can be linked to more than one customer. A single fraudster device link
 |---|---|---|---|
 | sim_swap_id | string | | PK. `SIM-0000001` |
 | customer_id | string | | FK → customer |
-| phone_number | string | ✔ | Number that was swapped |
+| phone_number | string | yes | Number that was swapped |
 | swapped_at | timestamp | | When the network performed the swap (event time) |
 | notified_at | timestamp | | When the bank was notified (can lag by hours) |
 | network | string | | Fictional mobile network (`MNO-1` … `MNO-4`) |
@@ -303,11 +303,11 @@ Current state of each saved payee. Full history is in `beneficiary_event`.
 |---|---|---|---|
 | beneficiary_id | string | | PK. `BEN-0000001` |
 | customer_id | string | | FK → customer who saved the payee |
-| beneficiary_name | string | ✔ | Name the customer gave the payee |
+| beneficiary_name | string | yes | Name the customer gave the payee |
 | payee_bank | string | | Fictional bank name |
-| payee_account_number | string | ✔ | |
+| payee_account_number | string | yes | |
 | payee_internal_account_id | string | | FK → account when the payee banks with us (enables the money-flow graph) |
-| shap_id | string | ✔ | Phone proxy for PayShap payees (nullable) |
+| shap_id | string | yes | Phone proxy for PayShap payees (nullable) |
 | created_at | timestamp | | |
 
 ### beneficiary_event
@@ -321,8 +321,8 @@ Captures supplier-mandate fraud: a payee's bank details change, then a large pay
 | event_type | string | | `created`, `details_changed`, `deleted` |
 | event_time | timestamp | | |
 | session_id | string | | FK → login_session that made the change |
-| old_account_number | string | ✔ | Null when created |
-| new_account_number | string | ✔ | Null when deleted |
+| old_account_number | string | yes | Null when created |
+| new_account_number | string | yes | Null when deleted |
 
 ### transaction
 

@@ -1,39 +1,33 @@
-"""Command-line interface and composition root: ``uv run sentinel <command>``.
+"""Command-line interface: `uv run sentinel <command>`.
 
-This is the only module that wires concrete implementations together. Every other
-package receives its dependencies as arguments, which keeps them easy to test and
-to change in isolation. Commands are added phase by phase (simulate, ingest, score,
-ui, demo).
+The only place where concrete implementations are created and wired together.
 """
 
 import typer
 
 from sentinel import __version__
 from sentinel.core.config import Settings, get_settings
-from sentinel.core.errors import SentinelError
+from sentinel.core.errors import ConfigurationError
 from sentinel.core.logs import configure_logging
 
-EXIT_CONFIGURATION_ERROR = 2
+CONFIG_ERROR_EXIT_CODE = 2
 
-app = typer.Typer(
-    help="Sentinel ZA: real-time bank fraud detection platform.",
-    no_args_is_help=True,
-)
+app = typer.Typer(help="Sentinel ZA: real-time bank fraud detection.", no_args_is_help=True)
 
 
-def _load_settings() -> Settings:
-    """Load settings, turning configuration errors into a clean CLI exit."""
+def load_settings() -> Settings:
+    """Load settings, or exit with a readable error instead of a traceback."""
     try:
         return get_settings()
-    except SentinelError as exc:
+    except ConfigurationError as exc:
         typer.echo(f"Error: {exc}", err=True)
-        raise typer.Exit(code=EXIT_CONFIGURATION_ERROR) from exc
+        raise typer.Exit(code=CONFIG_ERROR_EXIT_CODE) from exc
 
 
 @app.callback()
 def main() -> None:
     """Sentinel ZA command-line interface."""
-    settings = _load_settings()
+    settings = load_settings()
     configure_logging(settings.log_level, settings.log_format)
 
 
@@ -45,6 +39,6 @@ def version() -> None:
 
 @app.command("config")
 def show_config() -> None:
-    """Show the effective settings after environment and .env overrides."""
-    for name, value in _load_settings().model_dump(mode="json").items():
+    """Show the settings in use, after .env and environment overrides."""
+    for name, value in load_settings().model_dump(mode="json").items():
         typer.echo(f"{name} = {value}")
