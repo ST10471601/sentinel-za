@@ -54,6 +54,10 @@ docs/          architecture, data model, decisions
 tests/
 ```
 
+## Documentation
+
+- [Data model](docs/data-model.md): entities, ERD, data dictionary, medallion layers
+
 ## Data & privacy
 
 All data is synthetic. No real customer data is used (POPIA).
