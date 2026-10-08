@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+
+# Generated data (never commit synthetic datasets or databases)
+data/*
+!data/.gitkeep
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.db
+
+# ML / dbt artefacts
+mlruns/
+mlartifacts/
+analytics/target/
+analytics/dbt_packages/
+analytics/logs/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+.idea/

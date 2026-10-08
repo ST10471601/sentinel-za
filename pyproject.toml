@@ -1,0 +1,39 @@
+[project]
+name = "sentinel-za"
+version = "0.1.0"
+description = "Real-time fraud detection platform simulating a South African bank: streaming ingestion, medallion data layers, rules + ML scoring."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Daven Pillay" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "typer>=0.12",
+]
+
+[project.scripts]
+sentinel = "sentinel.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "pre-commit>=3.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sentinel"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
