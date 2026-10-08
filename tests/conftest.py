@@ -21,8 +21,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 
 @pytest.fixture(autouse=True)
-def isolated_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
-    """Give each test clean settings: no developer .env file, no SENTINEL_* variables."""
+def clean_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """Run each test with default settings: no .env file and no SENTINEL_* variables."""
     monkeypatch.chdir(tmp_path)
     for name in list(os.environ):
         if name.startswith(SETTINGS_ENV_PREFIX):
@@ -34,7 +34,7 @@ def isolated_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterat
 
 @pytest.fixture(autouse=True)
 def restore_root_logger() -> Iterator[None]:
-    """Undo any logging configuration a test applies, so tests stay independent."""
+    """Undo logging changes made by a test."""
     root = logging.getLogger()
     original_handlers, original_level = root.handlers[:], root.level
     yield

@@ -1,6 +1,9 @@
-# Fast checks on every commit. The full suite runs with `uv run poe check` and in CI.
-# Ruff runs from the project environment (`uv run`) so the version always matches uv.lock.
+# Fast checks on every commit, plus commit message format.
+# The full suite runs with `uv run poe check` and in CI.
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
+  # Ruff runs from the project environment so its version matches uv.lock.
   - repo: local
     hooks:
       - id: ruff-check
@@ -13,9 +16,12 @@ repos:
         entry: uv run ruff format
         language: system
         types: [python]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
+      - id: no-commit-to-branch # work on a branch, never directly on main
+        args: [--branch, main]
       - id: end-of-file-fixer
       - id: trailing-whitespace
         exclude: \.md$
@@ -24,3 +30,11 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: [--maxkb=1000]
+
+  # Commit messages must follow Conventional Commits, e.g. "feat: add customer generator".
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [--strict, feat, fix, refactor, test, docs, chore, ci, perf]

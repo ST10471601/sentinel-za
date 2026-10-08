@@ -1,10 +1,4 @@
-"""Logging configuration.
-
-Call :func:`configure_logging` once at startup (the CLI does this). Modules then
-log with ``logging.getLogger(__name__)`` and pass structured fields via
-``extra``, for example ``logger.info("Batch written", extra={"rows": 500})``.
-Never use ``print`` for diagnostics.
-"""
+"""Logging setup. Call configure_logging() once at startup, then use logging.getLogger(__name__)."""
 
 import json
 import logging
@@ -15,44 +9,37 @@ from sentinel.core.config import LogFormat, LogLevel
 
 TEXT_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 
-# Attributes every LogRecord has; anything else on a record came from ``extra``.
-_STANDARD_RECORD_ATTRIBUTES = frozenset(vars(logging.makeLogRecord({}))) | {
-    "message",
-    "asctime",
-}
+# Fields every log record has. Anything else was passed in with `extra=`.
+BUILTIN_FIELDS = set(vars(logging.makeLogRecord({}))) | {"message", "asctime"}
 
 
 class JsonFormatter(logging.Formatter):
-    """Render each record as one JSON object per line, including ``extra`` fields."""
+    """Writes each log record as one line of JSON."""
 
     def format(self, record: logging.LogRecord) -> str:
-        """Serialise ``record`` to a JSON string."""
-        payload: dict[str, object] = {
+        """Return the record as a JSON string."""
+        data: dict[str, object] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
         }
-        payload.update(
-            {
-                key: value
-                for key, value in vars(record).items()
-                if key not in _STANDARD_RECORD_ATTRIBUTES
-            }
-        )
+        extras = {key: value for key, value in vars(record).items() if key not in BUILTIN_FIELDS}
+        data.update(extras)
+
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, default=str)
+            data["exception"] = self.formatException(record.exc_info)
+        return json.dumps(data, default=str)
 
 
 def configure_logging(level: LogLevel, log_format: LogFormat) -> None:
-    """Send all log records to stderr at ``level`` in the chosen format.
-
-    Safe to call more than once: existing root handlers are replaced.
-    """
+    """Send logs to stderr. Safe to call more than once."""
     handler = logging.StreamHandler(sys.stderr)
-    formatter = JsonFormatter() if log_format is LogFormat.JSON else logging.Formatter(TEXT_FORMAT)
-    handler.setFormatter(formatter)
+    if log_format is LogFormat.JSON:
+        handler.setFormatter(JsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter(TEXT_FORMAT))
+
     root = logging.getLogger()
-    root.handlers[:] = [handler]
+    root.handlers = [handler]  # replace, so repeated calls don't duplicate output
     root.setLevel(level)

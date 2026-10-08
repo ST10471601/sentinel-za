@@ -1,35 +1,26 @@
-"""Time helpers. Every timestamp in the system is a timezone-aware UTC datetime.
-
-South Africa Standard Time is a fixed UTC+2 offset with no daylight saving, so a
-fixed offset is used rather than a time-zone database lookup. This also avoids
-needing the ``tzdata`` package on Windows.
-"""
+"""Time helpers. All timestamps are timezone-aware UTC."""
 
 from datetime import UTC, datetime, timedelta, timezone
 
 from sentinel.core.errors import DataValidationError
 
+# SA has no daylight saving, so a fixed +2h offset is exact.
+# It also avoids needing the tzdata package on Windows.
 SAST = timezone(timedelta(hours=2), name="SAST")
 
 
 def utc_now() -> datetime:
-    """Return the current time as a timezone-aware UTC datetime."""
+    """Return the current UTC time."""
     return datetime.now(UTC)
 
 
 def ensure_utc(value: datetime) -> datetime:
-    """Return ``value`` converted to UTC.
-
-    Raises:
-        DataValidationError: If ``value`` is naive (has no timezone), because its
-            meaning would be ambiguous.
-    """
+    """Convert to UTC. Naive datetimes are rejected because they are ambiguous."""
     if value.tzinfo is None or value.utcoffset() is None:
-        msg = f"Naive datetime is ambiguous; attach a timezone: {value.isoformat()}"
-        raise DataValidationError(msg)
+        raise DataValidationError(f"datetime has no timezone: {value.isoformat()}")
     return value.astimezone(UTC)
 
 
 def to_sast(value: datetime) -> datetime:
-    """Convert an aware datetime to South Africa Standard Time for display."""
+    """Convert to South African time for display."""
     return ensure_utc(value).astimezone(SAST)
