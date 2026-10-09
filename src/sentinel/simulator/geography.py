@@ -1,8 +1,11 @@
 """South African cities used for customer homes and merchant locations."""
 
+import random
 from dataclasses import dataclass
 
 from sentinel.domain.customers import Province
+
+COORDINATE_DECIMALS = 4  # about 11 m
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,3 +68,10 @@ CITIES: tuple[City, ...] = (
     City("Kimberley", Province.NORTHERN_CAPE, -28.7282, 24.7499, 1.5),
     City("Upington", Province.NORTHERN_CAPE, -28.4478, 21.2561, 0.5),
 )
+
+
+def jitter_location(rng: random.Random, city: City, max_degrees: float) -> tuple[float, float]:
+    """Return a point up to ``max_degrees`` from the city centre in each direction."""
+    lat = city.lat + rng.uniform(-max_degrees, max_degrees)
+    lon = city.lon + rng.uniform(-max_degrees, max_degrees)
+    return round(lat, COORDINATE_DECIMALS), round(lon, COORDINATE_DECIMALS)

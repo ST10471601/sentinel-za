@@ -1,6 +1,6 @@
 """Time helpers. All timestamps are timezone-aware UTC."""
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Annotated
 
 from pydantic import AfterValidator, AwareDatetime
@@ -27,6 +27,14 @@ def ensure_utc(value: datetime) -> datetime:
 def to_sast(value: datetime) -> datetime:
     """Convert to South African time for display."""
     return ensure_utc(value).astimezone(SAST)
+
+
+def add_years(day: date, years: int) -> date:
+    """Shift a date by whole years. 29 February becomes 28 February in non-leap years."""
+    try:
+        return day.replace(year=day.year + years)
+    except ValueError:
+        return day.replace(year=day.year + years, day=28)
 
 
 # Model field type: rejects naive datetimes and stores the value in UTC.

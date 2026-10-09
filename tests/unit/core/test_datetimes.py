@@ -1,9 +1,9 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from sentinel.core.datetimes import SAST, UtcDatetime, ensure_utc, to_sast, utc_now
+from sentinel.core.datetimes import SAST, UtcDatetime, add_years, ensure_utc, to_sast, utc_now
 from sentinel.core.errors import DataValidationError
 
 UTC_DATETIME = TypeAdapter(UtcDatetime)
@@ -41,3 +41,13 @@ def test_utc_datetime_field_stores_values_in_utc() -> None:
 def test_utc_datetime_field_rejects_naive_datetimes() -> None:
     with pytest.raises(ValidationError):
         UTC_DATETIME.validate_python(datetime(2026, 10, 8, 12, 0))  # noqa: DTZ001 - deliberately naive
+
+
+def test_add_years_moves_whole_years_both_ways() -> None:
+    assert add_years(date(2026, 1, 15), -18) == date(2008, 1, 15)
+    assert add_years(date(2026, 1, 15), 4) == date(2030, 1, 15)
+
+
+def test_add_years_turns_leap_day_into_28_february() -> None:
+    assert add_years(date(2024, 2, 29), 1) == date(2025, 2, 28)
+    assert add_years(date(2024, 2, 29), 4) == date(2028, 2, 29)
