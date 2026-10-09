@@ -1,6 +1,9 @@
 """Time helpers. All timestamps are timezone-aware UTC."""
 
 from datetime import UTC, datetime, timedelta, timezone
+from typing import Annotated
+
+from pydantic import AfterValidator, AwareDatetime
 
 from sentinel.core.errors import DataValidationError
 
@@ -24,3 +27,7 @@ def ensure_utc(value: datetime) -> datetime:
 def to_sast(value: datetime) -> datetime:
     """Convert to South African time for display."""
     return ensure_utc(value).astimezone(SAST)
+
+
+# Model field type: rejects naive datetimes and stores the value in UTC.
+UtcDatetime = Annotated[AwareDatetime, AfterValidator(ensure_utc)]

@@ -21,7 +21,7 @@ flowchart TB
     ingestion["ingestion<br>bronze landing"]
     broker["broker<br>event streams"]
     domain["domain<br>entities and events"]
-    core["core<br>config, logging, errors, money, time"]
+    core["core<br>config, logging, errors, money, time, checksums"]
 
     cli --> dashboard --> scoring
     scoring --> ml
@@ -44,7 +44,7 @@ flowchart TB
 | `simulator`, `ingestion` | Produce events; land events in bronze. Independent of each other | `broker` and below |
 | `broker` | Event broker interface and implementations | `domain`, `core` |
 | `domain` | Entities and events; pure data, no I/O | `core` |
-| `core` | Config, logging, errors, money, time | Nothing in `sentinel` |
+| `core` | Config, logging, errors, money, time, checksums | Nothing in `sentinel` |
 
 Two contracts are enforced:
 

@@ -1,1 +1,1 @@
-"""Shared building blocks: config, logging, errors, money and time."""
+"""Shared building blocks: config, logging, errors, money, time and checksums."""
