@@ -75,7 +75,7 @@ Pull request titles follow the same format. Descriptions say what changed, why, 
 - Return early instead of nesting `if` blocks.
 - Prefer plain functions. Add a class only when it holds state or represents a real thing.
 - Don't add abstraction (base classes, interfaces, factories) until there is a second real use.
-  The exception is the I/O boundaries already decided in the ADRs (broker, storage).
+  The exception is the I/O boundaries already decided in [docs/architecture.md](docs/architecture.md#key-decisions) (broker, storage).
 - No `utils.py` or `helpers.py` grab-bags. Put code next to what uses it.
 - Follow the layers in [docs/architecture.md](docs/architecture.md); `uv run poe arch` enforces them.
 
@@ -117,5 +117,5 @@ total = price * quantity  # multiply price by quantity
 
 ## Decisions
 
-Significant design decisions are recorded in [docs/adr/](docs/adr/README.md). If a change goes
-against an accepted ADR, add a new ADR that replaces it in the same pull request.
+Significant design decisions are recorded under [Key decisions](docs/architecture.md#key-decisions).
+If a change goes against one, update that entry in the same pull request.

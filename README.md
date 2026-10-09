@@ -68,9 +68,8 @@ tests/         unit/ and integration/
 
 ## Documentation
 
-- [Architecture](docs/architecture.md): layers and the rules that keep them clean
+- [Architecture](docs/architecture.md): layers, the rules that keep them clean, and key decisions
 - [Data model](docs/data-model.md): entities, ERD, data dictionary, medallion layers
-- [Architecture decision records](docs/adr/README.md): why the system is built this way
 - [Contributing](CONTRIBUTING.md): workflow, code conventions, testing rules
 
 ## Data & privacy
