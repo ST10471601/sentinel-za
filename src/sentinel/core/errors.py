@@ -11,3 +11,7 @@ class ConfigurationError(SentinelError):
 
 class DataValidationError(SentinelError):
     """Data breaks its schema or a business rule."""
+
+
+class SimulationError(SentinelError):
+    """The simulator cannot produce data with the given settings."""
