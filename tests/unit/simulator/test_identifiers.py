@@ -6,6 +6,7 @@ import pytest
 
 from sentinel.core.luhn import is_luhn_valid
 from sentinel.simulator.identifiers import (
+    IdSequence,
     make_account_number,
     make_card_token,
     make_company_reg_number,
@@ -31,6 +32,16 @@ def test_make_id_pads_to_seven_digits_by_default() -> None:
 
 def test_make_id_can_use_more_digits() -> None:
     assert make_id("TXN", 42, digits=9) == "TXN-000000042"
+
+
+def test_id_sequence_counts_up_from_one() -> None:
+    session_ids = IdSequence("SES")
+    assert [session_ids.next_id() for _ in range(3)] == [
+        "SES-0000001",
+        "SES-0000002",
+        "SES-0000003",
+    ]
+    assert IdSequence("TXN", digits=9).next_id() == "TXN-000000001"
 
 
 @pytest.mark.parametrize("number", [0, -1, 10_000_000])

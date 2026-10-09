@@ -30,6 +30,23 @@ def make_id(prefix: str, number: int, digits: int = ID_DIGITS) -> str:
     return f"{prefix}-{number:0{digits}d}"
 
 
+class IdSequence:
+    """Hands out consecutive IDs for one table, e.g. ``SES-0000001``, ``SES-0000002``.
+
+    Shared by every generator that adds rows to that table, so IDs never collide.
+    """
+
+    def __init__(self, prefix: str, digits: int = ID_DIGITS) -> None:
+        self._prefix = prefix
+        self._digits = digits
+        self._last_number = 0
+
+    def next_id(self) -> str:
+        """Return the next unused ID."""
+        self._last_number += 1
+        return make_id(self._prefix, self._last_number, self._digits)
+
+
 def make_sa_id_number(rng: random.Random, date_of_birth: date, *, is_female: bool) -> str:
     """Build a 13-digit SA ID number: YYMMDD, gender sequence, citizenship, 8, check digit."""
     # 0000-4999 is female, 5000-9999 is male.
