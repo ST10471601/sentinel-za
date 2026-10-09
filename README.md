@@ -32,9 +32,10 @@ Designed to run on an 8 GB laptop: no local servers, heavy infrastructure tested
 ## Quickstart
 
 ```bash
-uv sync                  # install
-uv run sentinel version  # run the CLI
-uv run poe check         # lint, strict types, architecture rules, tests
+uv sync                             # install
+uv run sentinel version             # run the CLI
+uv run sentinel simulate reference  # generate reference data in data/reference/
+uv run poe check                    # lint, strict types, architecture rules, tests
 ```
 
 ## Engineering standards

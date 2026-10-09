@@ -161,6 +161,8 @@ erDiagram
 | **Truth** | Parquet, separate folder | Simulator ground truth: for training labels and evaluation only |
 
 **Reference data (batch, written once per simulation):** `customer`, `account`, `card`, `device`, `customer_device`, `merchant`.
+`uv run sentinel simulate reference` writes one Parquet file per table to `data/reference/`.
+Each file's metadata records the seed and simulation start that produced it.
 
 **Event streams (through the broker):**
 
