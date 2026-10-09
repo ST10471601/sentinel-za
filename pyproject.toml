@@ -7,9 +7,12 @@ license = "MIT"
 authors = [{ name = "Daven Pillay" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "pyarrow>=26.0",
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
     "typer>=0.12",
+    # Windows has no timezone database; pyarrow needs one to read UTC timestamps
+    "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 
 [project.scripts]
@@ -91,6 +94,11 @@ strict = true
 files = ["src", "tests"]
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
+
+# pyarrow ships without type hints
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

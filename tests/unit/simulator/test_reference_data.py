@@ -5,7 +5,11 @@ import pytest
 
 from sentinel.core.datetimes import SAST
 from sentinel.core.errors import DataValidationError
-from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
+from sentinel.simulator.reference_data import (
+    DEFAULT_SIMULATION_START,
+    ReferenceData,
+    generate_reference_data,
+)
 
 SMALL = 200
 
@@ -27,8 +31,22 @@ def test_tables_use_separate_random_streams() -> None:
 
 def test_tables_are_listed_in_a_fixed_order(reference_data: ReferenceData) -> None:
     tables = reference_data.tables()
-    assert list(tables) == ["customer", "account", "card", "device", "customer_device", "merchant"]
-    assert tables["customer"] == reference_data.customers
+    assert [table.name for table in tables] == [
+        "customer",
+        "account",
+        "card",
+        "device",
+        "customer_device",
+        "merchant",
+    ]
+    assert tables[0].rows == reference_data.customers
+    assert all(isinstance(row, table.model) for table in tables for row in table.rows)
+
+
+def test_inputs_are_recorded() -> None:
+    reference_data = generate_reference_data(3, SMALL)
+    assert reference_data.seed == 3
+    assert reference_data.simulation_start == DEFAULT_SIMULATION_START
 
 
 def test_simulation_start_in_another_timezone_is_converted_to_utc() -> None:

@@ -24,9 +24,20 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class ReferenceData:
-    """All reference tables for one simulation."""
+class ReferenceTable:
+    """One table: its name, the model each row follows, and the rows."""
 
+    name: str
+    model: type[DomainModel]
+    rows: tuple[DomainModel, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceData:
+    """All reference tables for one simulation, and the inputs that produced them."""
+
+    seed: int
+    simulation_start: datetime
     customers: tuple[Customer, ...]
     accounts: tuple[Account, ...]
     cards: tuple[Card, ...]
@@ -34,16 +45,16 @@ class ReferenceData:
     customer_devices: tuple[CustomerDevice, ...]
     merchants: tuple[Merchant, ...]
 
-    def tables(self) -> dict[str, tuple[DomainModel, ...]]:
-        """Return each table name with its rows, in a fixed order."""
-        return {
-            "customer": self.customers,
-            "account": self.accounts,
-            "card": self.cards,
-            "device": self.devices,
-            "customer_device": self.customer_devices,
-            "merchant": self.merchants,
-        }
+    def tables(self) -> tuple[ReferenceTable, ...]:
+        """Return every table in a fixed order."""
+        return (
+            ReferenceTable("customer", Customer, self.customers),
+            ReferenceTable("account", Account, self.accounts),
+            ReferenceTable("card", Card, self.cards),
+            ReferenceTable("device", Device, self.devices),
+            ReferenceTable("customer_device", CustomerDevice, self.customer_devices),
+            ReferenceTable("merchant", Merchant, self.merchants),
+        )
 
 
 def generate_reference_data(
@@ -64,6 +75,8 @@ def generate_reference_data(
     merchants = generate_merchants(make_rng(seed, "merchants"))
 
     reference_data = ReferenceData(
+        seed=seed,
+        simulation_start=start,
         customers=tuple(customers),
         accounts=tuple(accounts),
         cards=tuple(cards),
@@ -71,6 +84,6 @@ def generate_reference_data(
         customer_devices=tuple(customer_devices),
         merchants=tuple(merchants),
     )
-    row_counts = {name: len(rows) for name, rows in reference_data.tables().items()}
+    row_counts = {table.name: len(table.rows) for table in reference_data.tables()}
     logger.info("generated reference data", extra={"seed": seed, **row_counts})
     return reference_data
