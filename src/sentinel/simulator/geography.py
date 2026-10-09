@@ -72,6 +72,13 @@ CITIES: tuple[City, ...] = (
 
 def jitter_location(rng: random.Random, city: City, max_degrees: float) -> tuple[float, float]:
     """Return a point up to ``max_degrees`` from the city centre in each direction."""
-    lat = city.lat + rng.uniform(-max_degrees, max_degrees)
-    lon = city.lon + rng.uniform(-max_degrees, max_degrees)
+    return jitter_point(rng, city.lat, city.lon, max_degrees)
+
+
+def jitter_point(
+    rng: random.Random, lat: float, lon: float, max_degrees: float
+) -> tuple[float, float]:
+    """Return a point up to ``max_degrees`` from ``lat``, ``lon`` in each direction."""
+    lat += rng.uniform(-max_degrees, max_degrees)
+    lon += rng.uniform(-max_degrees, max_degrees)
     return round(lat, COORDINATE_DECIMALS), round(lon, COORDINATE_DECIMALS)
