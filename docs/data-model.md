@@ -333,7 +333,7 @@ The core event. One row per entry posted to an account. Internal transfers produ
 | Column | Type | PII | Description |
 |---|---|---|---|
 | transaction_id | string | | PK. `TXN-000000001` |
-| transfer_group_id | string | | Links both legs of an internal transfer (nullable) |
+| transfer_group_id | string | | `TRF-000000001`. Links both legs of an internal transfer (nullable) |
 | account_id | string | | FK → account the entry is posted to |
 | direction | string | | `debit` (money out) or `credit` (money in) |
 | amount_cents | bigint | | Always positive, in ZAR cents |
@@ -353,7 +353,7 @@ The core event. One row per entry posted to an account. Internal transfers produ
 | terminal_lat, terminal_lon | double | | Card-present location (nullable) |
 | country_code | string | | Where the transaction happened |
 | status | string | | `approved` or `declined` |
-| decline_reason | string | | e.g. `insufficient_funds`, `limit_exceeded` (nullable) |
+| decline_reason | string | | `insufficient_funds` or `limit_exceeded` (nullable) |
 | balance_after_cents | bigint | | Account balance after posting |
 | schema_version | int | | Event schema version, starts at `1` |
 
