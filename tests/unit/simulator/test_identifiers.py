@@ -6,7 +6,6 @@ import pytest
 
 from sentinel.core.luhn import is_luhn_valid
 from sentinel.simulator.identifiers import (
-    MAX_ID_NUMBER,
     make_account_number,
     make_card_token,
     make_company_reg_number,
@@ -25,12 +24,16 @@ def rng() -> random.Random:
     return random.Random(7)
 
 
-def test_make_id_pads_to_seven_digits() -> None:
+def test_make_id_pads_to_seven_digits_by_default() -> None:
     assert make_id("CUS", 42) == "CUS-0000042"
-    assert make_id("MER", MAX_ID_NUMBER) == "MER-9999999"
+    assert make_id("MER", 9_999_999) == "MER-9999999"
 
 
-@pytest.mark.parametrize("number", [0, -1, MAX_ID_NUMBER + 1])
+def test_make_id_can_use_more_digits() -> None:
+    assert make_id("TXN", 42, digits=9) == "TXN-000000042"
+
+
+@pytest.mark.parametrize("number", [0, -1, 10_000_000])
 def test_make_id_rejects_numbers_out_of_range(number: int) -> None:
     with pytest.raises(ValueError, match="between 1 and"):
         make_id("CUS", number)

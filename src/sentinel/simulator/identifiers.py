@@ -11,7 +11,6 @@ from datetime import date
 from sentinel.core.luhn import luhn_check_digit
 
 ID_DIGITS = 7
-MAX_ID_NUMBER = 10**ID_DIGITS - 1
 
 # First two digits after +27 used by SA mobile networks.
 MOBILE_PREFIXES: tuple[str, ...] = (
@@ -23,11 +22,12 @@ MOBILE_PREFIXES: tuple[str, ...] = (
 PRIVATE_COMPANY_SUFFIX = "07"  # CIPC entity type for a (Pty) Ltd
 
 
-def make_id(prefix: str, number: int) -> str:
-    """Build an entity ID such as ``CUS-0000042``."""
-    if not 1 <= number <= MAX_ID_NUMBER:
-        raise ValueError(f"ID number must be between 1 and {MAX_ID_NUMBER}, got {number}")
-    return f"{prefix}-{number:0{ID_DIGITS}d}"
+def make_id(prefix: str, number: int, digits: int = ID_DIGITS) -> str:
+    """Build an entity ID such as ``CUS-0000042``. High-volume events use more digits."""
+    max_number = 10**digits - 1
+    if not 1 <= number <= max_number:
+        raise ValueError(f"ID number must be between 1 and {max_number}, got {number}")
+    return f"{prefix}-{number:0{digits}d}"
 
 
 def make_sa_id_number(rng: random.Random, date_of_birth: date, *, is_female: bool) -> str:
