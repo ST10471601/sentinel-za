@@ -435,9 +435,9 @@ Added to every bronze row by the ingestion consumer.
 | started_at | timestamp | |
 | ended_at | timestamp | |
 | total_amount_cents | bigint | Total stolen in this episode |
-| params | json | Parameters used, for reproducibility |
+| params | string | JSON object of the parameters used, for reproducibility |
 
-**transaction_label**
+**transaction_label** (one per transaction, fraud or not)
 
 | Column | Type | Description |
 |---|---|---|
@@ -447,7 +447,7 @@ Added to every bronze row by the ingestion consumer.
 | scenario_id | string | FK → scenario_instance (nullable) |
 | reported_at | timestamp | When the bank would learn it was fraud (claim or chargeback). Models may only use labels available at training time |
 
-**account_label**
+**account_label** (one per account)
 
 | Column | Type | Description |
 |---|---|---|
