@@ -130,7 +130,9 @@ def card_drafts(
         card = _pick_card(rng, habits)
         amount = card_amount(rng, category, customer.income_band)
         if budget.try_spend(card.account_id, amount):
-            drafts.append(_purchase(rng, card, merchant, amount, day, profile.contactless_share))
+            drafts.append(
+                purchase_draft(rng, card, merchant, amount, day, profile.contactless_share)
+            )
 
     for _ in range(sample_daily_count(rng, profile.atm_withdrawals_per_month, weight)):
         atm = _pick_merchant(rng, habits, MerchantCategory.ATM)
@@ -141,7 +143,7 @@ def card_drafts(
     return drafts
 
 
-def _purchase(
+def purchase_draft(
     rng: random.Random,
     card: Card,
     merchant: Merchant,
@@ -149,6 +151,7 @@ def _purchase(
     day: date,
     contactless_share: float,
 ) -> TransactionDraft:
+    """A card purchase at ``merchant``: online, or in store at its terminal."""
     event_time = pick_event_time(rng, day)
     if merchant.is_online:
         currency = CURRENCY_BY_COUNTRY.get(merchant.country_code)

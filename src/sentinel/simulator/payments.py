@@ -135,16 +135,32 @@ def payment_activity(
 
 
 def _add_payee_payment(payer: _Payer, day: date, amount_cents: int, activity: DayPayments) -> None:
-    rng, habits = payer.rng, payer.habits
+    rng = payer.rng
     session = _log_in(payer, pick_event_time(rng, day))
-    payee = rng.choice(habits.beneficiaries)
+    payee = rng.choice(payer.habits.beneficiaries)
+    payment = pay_payee(
+        rng, payer.customer, payer.habits, session, payee, amount_cents, _after_login(rng, session)
+    )
+    activity.sessions.append(session)
+    activity.payments.append(payment)
+
+
+def pay_payee(
+    rng: random.Random,
+    customer: Customer,
+    habits: PaymentHabits,
+    session: LoginSession,
+    payee: Beneficiary,
+    amount_cents: int,
+    event_time: datetime,
+) -> PlannedPayment:
+    """Pay a saved payee from the main account, within an open login session."""
     # PayShap only up to the account's PayShap limit; bigger payments go by EFT.
     use_payshap = (
-        chance(rng, SPENDING_BY_BAND[payer.customer.income_band].payshap_share)
+        chance(rng, SPENDING_BY_BAND[customer.income_band].payshap_share)
         and amount_cents <= habits.main_account.payshap_daily_limit_cents
     )
     channel = Channel.PAYSHAP if use_payshap else Channel.EFT
-    event_time = _after_login(rng, session)
     payer_id = habits.main_account.account_id
 
     debit = TransactionDraft(
@@ -172,8 +188,7 @@ def _add_payee_payment(payer: _Payer, day: date, amount_cents: int, activity: Da
             country_code=HOME_COUNTRY,
             counterparty_account_id=payer_id,
         )
-    activity.sessions.append(session)
-    activity.payments.append(PlannedPayment(debit, credit))
+    return PlannedPayment(debit, credit)
 
 
 def _add_own_transfers(

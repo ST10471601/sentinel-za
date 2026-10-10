@@ -36,10 +36,11 @@ class IdSequence:
     Shared by every generator that adds rows to that table, so IDs never collide.
     """
 
-    def __init__(self, prefix: str, digits: int = ID_DIGITS) -> None:
+    def __init__(self, prefix: str, digits: int = ID_DIGITS, start_after: int = 0) -> None:
+        """``start_after`` continues a table that already has that many rows."""
         self._prefix = prefix
         self._digits = digits
-        self._last_number = 0
+        self._last_number = start_after
 
     def next_id(self) -> str:
         """Return the next unused ID."""
