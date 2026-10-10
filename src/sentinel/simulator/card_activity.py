@@ -4,7 +4,7 @@ import random
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from sentinel.domain.accounts import Card, CardType
 from sentinel.domain.customers import Customer
@@ -154,23 +154,7 @@ def purchase_draft(
     """A card purchase at ``merchant``: online, or in store at its terminal."""
     event_time = pick_event_time(rng, day)
     if merchant.is_online:
-        currency = CURRENCY_BY_COUNTRY.get(merchant.country_code)
-        return TransactionDraft(
-            account_id=card.account_id,
-            direction=Direction.DEBIT,
-            amount_cents=amount_cents,
-            event_time=event_time,
-            channel=Channel.CARD_NOT_PRESENT,
-            auth_method=TransactionAuthMethod.THREE_DS,
-            country_code=merchant.country_code,
-            original_amount_cents=(
-                round(amount_cents / ZAR_PER_UNIT[currency]) if currency else None
-            ),
-            original_currency=currency,
-            card_id=card.card_id,
-            merchant_id=merchant.merchant_id,
-            entry_mode=EntryMode.ECOMMERCE,
-        )
+        return online_purchase_draft(card, merchant, amount_cents, event_time)
 
     is_contactless = chance(rng, contactless_share)
     needs_pin = not is_contactless or amount_cents > CONTACTLESS_NO_PIN_LIMIT_CENTS
@@ -187,6 +171,27 @@ def purchase_draft(
         entry_mode=EntryMode.CONTACTLESS if is_contactless else EntryMode.CHIP,
         terminal_lat=merchant.lat,
         terminal_lon=merchant.lon,
+    )
+
+
+def online_purchase_draft(
+    card: Card, merchant: Merchant, amount_cents: int, event_time: datetime
+) -> TransactionDraft:
+    """A card-not-present purchase, priced in the merchant's currency when it is foreign."""
+    currency = CURRENCY_BY_COUNTRY.get(merchant.country_code)
+    return TransactionDraft(
+        account_id=card.account_id,
+        direction=Direction.DEBIT,
+        amount_cents=amount_cents,
+        event_time=event_time,
+        channel=Channel.CARD_NOT_PRESENT,
+        auth_method=TransactionAuthMethod.THREE_DS,
+        country_code=merchant.country_code,
+        original_amount_cents=round(amount_cents / ZAR_PER_UNIT[currency]) if currency else None,
+        original_currency=currency,
+        card_id=card.card_id,
+        merchant_id=merchant.merchant_id,
+        entry_mode=EntryMode.ECOMMERCE,
     )
 
 

@@ -1,4 +1,4 @@
-"""Run the simulation day by day: every customer's activity, settled through the ledger."""
+"""Run the simulation day by day: customer activity plus injected fraud, through the ledger."""
 
 import logging
 import random
@@ -15,6 +15,7 @@ from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.customers import Customer
 from sentinel.domain.devices import CustomerDevice, Device
+from sentinel.domain.labels import ScenarioInstance, TransactionLabel
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
 from sentinel.simulator.beneficiaries import generate_beneficiaries
@@ -26,6 +27,10 @@ from sentinel.simulator.card_activity import (
     plan_card_habits,
 )
 from sentinel.simulator.drafts import TransactionDraft, to_transaction
+from sentinel.simulator.fraud.card_not_present import CardNotPresent
+from sentinel.simulator.fraud.episodes import Episode, FraudAction, Scenario, Victim
+from sentinel.simulator.fraud.ground_truth import GroundTruth, normal_labels
+from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
 from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.ledger import Ledger
 from sentinel.simulator.payments import (
@@ -76,6 +81,8 @@ class HistoryTable(StrEnum):
     BENEFICIARY_EVENT = "beneficiary_event"
     DEVICE = "device"  # devices registered during the simulation
     CUSTOMER_DEVICE = "customer_device"
+    SCENARIO_INSTANCE = "scenario_instance"
+    TRANSACTION_LABEL = "transaction_label"
 
 
 MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
@@ -85,7 +92,12 @@ MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
     HistoryTable.BENEFICIARY_EVENT: BeneficiaryEvent,
     HistoryTable.DEVICE: Device,
     HistoryTable.CUSTOMER_DEVICE: CustomerDevice,
+    HistoryTable.SCENARIO_INSTANCE: ScenarioInstance,
+    HistoryTable.TRANSACTION_LABEL: TransactionLabel,
 }
+
+# Ground truth: kept apart from what the bank observes, so models can't train on it by accident.
+TRUTH_TABLES = frozenset({HistoryTable.SCENARIO_INSTANCE, HistoryTable.TRANSACTION_LABEL})
 
 
 class RowSink(Protocol):
@@ -103,6 +115,18 @@ class HistorySummary:
     last_day: date
     row_counts: dict[HistoryTable, int]
     declined_count: int
+    fraud_count: int  # transactions labelled as fraud, approved or declined
+
+
+@dataclass(frozen=True, slots=True)
+class _FraudAttempt:
+    """A fraudster's transaction, tagged with the episode it belongs to."""
+
+    scenario_id: str
+    action: FraudAction
+
+
+type _Planned = TransactionDraft | PlannedPayment | _FraudAttempt
 
 
 @dataclass(slots=True)
@@ -123,7 +147,7 @@ class _CustomerPlan:
 class _DayOutput:
     """Everything one day produced, before the bank settles the transactions."""
 
-    planned: list[TransactionDraft | PlannedPayment] = field(default_factory=list)
+    planned: list[_Planned] = field(default_factory=list)
     sessions: list[LoginSession] = field(default_factory=list)
     devices: list[Device] = field(default_factory=list)
     device_links: list[CustomerDevice] = field(default_factory=list)
@@ -131,17 +155,24 @@ class _DayOutput:
     beneficiary_events: list[BeneficiaryEvent] = field(default_factory=list)
 
 
-def simulate_history(reference: ReferenceData, months: int, sink: RowSink) -> HistorySummary:
-    """Simulate ``months`` of activity from the reference data's start date."""
+def simulate_history(
+    reference: ReferenceData,
+    months: int,
+    sink: RowSink,
+    fraud: FraudSettings | None = None,
+) -> HistorySummary:
+    """Simulate ``months`` of activity from the reference data's start date, with fraud."""
     if months < 1:
         raise ValueError(f"months must be at least 1, got {months}")
-    return _Simulation(reference, months, sink).run()
+    return _Simulation(reference, months, sink, fraud or FraudSettings()).run()
 
 
 class _Simulation:
     """One simulation run. Holds the ledger, ID counters and each customer's plan."""
 
-    def __init__(self, reference: ReferenceData, months: int, sink: RowSink) -> None:
+    def __init__(
+        self, reference: ReferenceData, months: int, sink: RowSink, fraud: FraudSettings
+    ) -> None:
         self._sink = sink
         self._first_day = to_sast(reference.simulation_start).date()
         self._last_day = add_months(self._first_day, months) - timedelta(days=1)
@@ -195,6 +226,7 @@ class _Simulation:
             )
             for customer in reference.customers
         ]
+        self._ground_truth, self._episodes_by_day = self._plan_fraud(reference, months, fraud)
 
     def run(self) -> HistorySummary:
         """Simulate every day in order and send the rows to the sink."""
@@ -203,8 +235,43 @@ class _Simulation:
             self._run_day(day)
             day += timedelta(days=1)
 
+        instances, fraud_labels = self._ground_truth.finish()
+        self._emit(HistoryTable.SCENARIO_INSTANCE, instances)
+        self._emit(HistoryTable.TRANSACTION_LABEL, fraud_labels)
+
         logger.info("simulated history", extra={t.value: n for t, n in self._counts.items()})
-        return HistorySummary(self._first_day, self._last_day, self._counts, self._declined_count)
+        return HistorySummary(
+            self._first_day,
+            self._last_day,
+            self._counts,
+            self._declined_count,
+            fraud_count=len(fraud_labels),
+        )
+
+    def _plan_fraud(
+        self, reference: ReferenceData, months: int, fraud: FraudSettings
+    ) -> tuple[GroundTruth, dict[date, list[Episode]]]:
+        """Pick fraud episodes and victims up front, as unusual events are."""
+        scenarios: list[Scenario] = [CardNotPresent(reference.merchants)]
+        victims = [Victim(plan.customer, plan.cards, plan.payments) for plan in self._plans]
+        episodes = plan_episodes(
+            make_rng(reference.seed, "fraud"),
+            scenarios,
+            victims,
+            (self._first_day, self._last_day),
+            episode_count(fraud, len(victims), months),
+            IdSequence("SCN"),
+        )
+
+        ground_truth = GroundTruth(
+            make_rng(reference.seed, "fraud-reports"), fraud.unreported_share
+        )
+        episodes_by_day: dict[date, list[Episode]] = defaultdict(list)
+        for episode in episodes:
+            ground_truth.add_episode(episode)
+            for day in episode.days():
+                episodes_by_day[day].append(episode)
+        return ground_truth, episodes_by_day
 
     def _plan_customer(
         self,
@@ -237,13 +304,18 @@ class _Simulation:
         output = _DayOutput()
         for plan in self._plans:
             self._customer_day(plan, day, output)
+        for episode in self._episodes_by_day.get(day, []):
+            actions = episode.act(day, self._ledger)
+            output.planned += [_FraudAttempt(episode.scenario_id, a) for a in actions.attempts]
 
         self._emit(HistoryTable.LOGIN_SESSION, output.sessions)
         self._emit(HistoryTable.DEVICE, output.devices)
         self._emit(HistoryTable.CUSTOMER_DEVICE, output.device_links)
         self._emit(HistoryTable.BENEFICIARY, output.beneficiaries)
         self._emit(HistoryTable.BENEFICIARY_EVENT, output.beneficiary_events)
-        self._emit(HistoryTable.TRANSACTION, self._settle(output.planned))
+        transactions, normal = self._settle(output.planned)
+        self._emit(HistoryTable.TRANSACTION, transactions)
+        self._emit(HistoryTable.TRANSACTION_LABEL, normal_labels(normal))
 
     def _customer_day(self, plan: _CustomerPlan, day: date, output: _DayOutput) -> None:
         rng = self._rng
@@ -338,20 +410,32 @@ class _Simulation:
             return 0
         return max(self._ledger.balance_cents(habits.credit_account.account_id), 0)
 
-    def _settle(self, planned: list[TransactionDraft | PlannedPayment]) -> list[Transaction]:
-        """Settle the day's transactions in time order, as the bank would."""
+    def _settle(self, planned: list[_Planned]) -> tuple[list[Transaction], list[Transaction]]:
+        """Settle the day's transactions in time order, as the bank would.
+
+        Returns every transaction, and separately the ones no fraudster touched.
+        """
         planned.sort(key=_event_time)
         transactions: list[Transaction] = []
+        normal: list[Transaction] = []
         for item in planned:
-            if isinstance(item, PlannedPayment):
-                debit = self._post(item.debit)
-                transactions.append(debit)
-                # The payee is only credited if the payment went through.
-                if item.credit is not None and debit.status is TransactionStatus.APPROVED:
-                    transactions.append(self._post(item.credit))
+            if isinstance(item, _FraudAttempt):
+                settled = self._settle_action(item.action)
+                self._ground_truth.record(item.scenario_id, settled)
             else:
-                transactions.append(self._post(item))
-        return transactions
+                settled = self._settle_action(item)
+                normal += settled
+            transactions += settled
+        return transactions, normal
+
+    def _settle_action(self, action: TransactionDraft | PlannedPayment) -> list[Transaction]:
+        if isinstance(action, TransactionDraft):
+            return [self._post(action)]
+        debit = self._post(action.debit)
+        # The payee is only credited if the payment went through.
+        if action.credit is not None and debit.status is TransactionStatus.APPROVED:
+            return [debit, self._post(action.credit)]
+        return [debit]
 
     def _post(self, draft: TransactionDraft) -> Transaction:
         settlement = self._ledger.settle(draft)
@@ -366,7 +450,9 @@ class _Simulation:
             self._counts[table] += len(rows)
 
 
-def _event_time(item: TransactionDraft | PlannedPayment) -> datetime:
+def _event_time(item: _Planned) -> datetime:
+    if isinstance(item, _FraudAttempt):
+        return _event_time(item.action)
     return item.debit.event_time if isinstance(item, PlannedPayment) else item.event_time
 
 

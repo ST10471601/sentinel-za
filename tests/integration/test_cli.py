@@ -50,6 +50,7 @@ def test_simulation_errors_exit_cleanly(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 HISTORY_DIR = Path("data/history")
+TRUTH_DIR = Path("data/truth")
 
 
 def test_simulate_history_writes_reference_and_history_files() -> None:
@@ -59,8 +60,11 @@ def test_simulate_history_writes_reference_and_history_files() -> None:
     assert result.exit_code == 0, result.output
     assert "history 2026-01-01 to 2026-01-31" in result.output
     assert "declined transactions" in result.output
+    assert "fraud transactions" in result.output
     assert pq.read_metadata(REFERENCE_DIR / "customer.parquet").num_rows == 30
-    assert pq.read_metadata(HISTORY_DIR / "transaction.parquet").num_rows > 0
+    transactions = pq.read_metadata(HISTORY_DIR / "transaction.parquet").num_rows
+    assert transactions > 0
+    assert pq.read_metadata(TRUTH_DIR / "transaction_label.parquet").num_rows == transactions
 
 
 def test_months_must_be_positive() -> None:

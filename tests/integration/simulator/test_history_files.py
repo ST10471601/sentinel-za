@@ -52,7 +52,7 @@ def test_writes_every_table_with_the_model_schema(reference: ReferenceData, tmp_
         stored = pq.read_table(path)
         assert stored.schema.remove_metadata() == schema_for(MODEL_BY_TABLE[table])
         assert stored.num_rows == summary.row_counts[table]
-    assert not list(tmp_path.glob(".*.tmp"))
+    assert not list(tmp_path.glob("**/.*.tmp"))
 
 
 def test_rows_are_written_in_batches_and_round_trip_in_order(
@@ -91,4 +91,4 @@ def test_a_failed_run_keeps_the_previous_files(
         simulate_history(reference, 1, RecordingSink(writer, fail_after_days=5))
 
     assert pq.read_metadata(path).num_rows == rows_before
-    assert not list(tmp_path.glob(".*.tmp"))
+    assert not list(tmp_path.glob("**/.*.tmp"))
