@@ -1,5 +1,6 @@
 """Time helpers. All timestamps are timezone-aware UTC."""
 
+import calendar
 from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Annotated
 
@@ -35,6 +36,13 @@ def add_years(day: date, years: int) -> date:
         return day.replace(year=day.year + years)
     except ValueError:
         return day.replace(year=day.year + years, day=28)
+
+
+def add_months(day: date, months: int) -> date:
+    """Shift a date by whole months. Days past the new month's end become its last day."""
+    year, month_index = divmod(day.year * 12 + day.month - 1 + months, 12)
+    month = month_index + 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
 
 
 # Model field type: rejects naive datetimes and stores the value in UTC.

@@ -164,6 +164,11 @@ erDiagram
 `uv run sentinel simulate reference` writes one Parquet file per table to `data/reference/`.
 Each file's metadata records the seed and simulation start that produced it.
 
+**Simulated history (batch, until the streaming simulator replays it):** `uv run sentinel simulate history`
+writes the reference data, then `transaction`, `login_session`, `beneficiary`, `beneficiary_event`
+and the `device` and `customer_device` rows added during the period to `data/history/`.
+Rows are written in batches, so memory stays flat however long the run.
+
 **Event streams (through the broker):**
 
 | Topic | Entity |

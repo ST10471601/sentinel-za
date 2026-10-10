@@ -3,6 +3,7 @@
 The only place where concrete implementations are created and wired together.
 """
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -11,9 +12,16 @@ from sentinel import __version__
 from sentinel.core.config import Settings, get_settings
 from sentinel.core.errors import ConfigurationError, SimulationError
 from sentinel.core.logs import configure_logging
-from sentinel.simulator.reference_data import DEFAULT_CUSTOMER_COUNT, generate_reference_data
+from sentinel.simulator.history import simulate_history
+from sentinel.simulator.history_files import HISTORY_DIR_NAME, HistoryWriter, history_metadata
+from sentinel.simulator.reference_data import (
+    DEFAULT_CUSTOMER_COUNT,
+    ReferenceData,
+    generate_reference_data,
+)
 from sentinel.simulator.reference_files import REFERENCE_DIR_NAME, write_reference_data
 
+DEFAULT_MONTHS = 3
 SIMULATION_ERROR_EXIT_CODE = 1
 CONFIG_ERROR_EXIT_CODE = 2
 
@@ -51,25 +59,61 @@ def show_config() -> None:
         typer.echo(f"{name} = {value}")
 
 
+CustomersOption = Annotated[int, typer.Option(min=1, help="Number of customers to generate.")]
+SeedOption = Annotated[
+    int | None, typer.Option(min=0, help="Random seed. Defaults to SENTINEL_SEED.")
+]
+
+
 @simulate_app.command("reference")
 def simulate_reference(
-    customers: Annotated[
-        int, typer.Option(min=1, help="Number of customers to generate.")
-    ] = DEFAULT_CUSTOMER_COUNT,
-    seed: Annotated[
-        int | None, typer.Option(min=0, help="Random seed. Defaults to SENTINEL_SEED.")
-    ] = None,
+    customers: CustomersOption = DEFAULT_CUSTOMER_COUNT, seed: SeedOption = None
 ) -> None:
     """Generate customers, accounts, cards, devices and merchants as Parquet files."""
     settings = load_settings()
+    reference_data = _generate_reference(seed if seed is not None else settings.seed, customers)
+    _write_reference(reference_data, settings.data_dir)
+
+
+@simulate_app.command("history")
+def simulate_history_command(
+    customers: CustomersOption = DEFAULT_CUSTOMER_COUNT,
+    months: Annotated[int, typer.Option(min=1, help="Months of activity to simulate.")] = (
+        DEFAULT_MONTHS
+    ),
+    seed: SeedOption = None,
+) -> None:
+    """Generate reference data, then months of everyday activity, as Parquet files."""
+    settings = load_settings()
+    reference_data = _generate_reference(seed if seed is not None else settings.seed, customers)
+    _write_reference(reference_data, settings.data_dir)
+
+    writer = HistoryWriter(
+        settings.data_dir / HISTORY_DIR_NAME, history_metadata(reference_data, months)
+    )
     try:
-        reference_data = generate_reference_data(
-            seed if seed is not None else settings.seed, customers
-        )
+        with writer:
+            summary = simulate_history(reference_data, months, writer)
     except SimulationError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=SIMULATION_ERROR_EXIT_CODE) from exc
 
-    paths = write_reference_data(reference_data, settings.data_dir / REFERENCE_DIR_NAME)
+    typer.echo(f"history {summary.first_day} to {summary.last_day}")
+    paths = writer.paths()
+    for table, count in summary.row_counts.items():
+        typer.echo(f"{table.value:<18}{count:>10,} rows  {paths[table]}")
+    typer.echo(f"declined transactions: {summary.declined_count:,}")
+
+
+def _generate_reference(seed: int, customers: int) -> ReferenceData:
+    try:
+        return generate_reference_data(seed, customers)
+    except SimulationError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=SIMULATION_ERROR_EXIT_CODE) from exc
+
+
+def _write_reference(reference_data: ReferenceData, data_dir: Path) -> None:
+    paths = write_reference_data(reference_data, data_dir / REFERENCE_DIR_NAME)
     for table in reference_data.tables():
-        typer.echo(f"{table.name:<16}{len(table.rows):>8,} rows  {paths[table.name]}")
+        typer.echo(f"{table.name:<18}{len(table.rows):>10,} rows  {paths[table.name]}")
