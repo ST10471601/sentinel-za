@@ -35,6 +35,7 @@ Designed to run on an 8 GB laptop: no local servers, heavy infrastructure tested
 uv sync                             # install
 uv run sentinel version             # run the CLI
 uv run sentinel simulate reference  # generate reference data in data/reference/
+uv run sentinel simulate history    # plus 3 months of activity in data/history/
 uv run poe check                    # lint, strict types, architecture rules, tests
 ```
 

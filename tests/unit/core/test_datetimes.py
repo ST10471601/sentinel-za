@@ -3,7 +3,15 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from sentinel.core.datetimes import SAST, UtcDatetime, add_years, ensure_utc, to_sast, utc_now
+from sentinel.core.datetimes import (
+    SAST,
+    UtcDatetime,
+    add_months,
+    add_years,
+    ensure_utc,
+    to_sast,
+    utc_now,
+)
 from sentinel.core.errors import DataValidationError
 
 UTC_DATETIME = TypeAdapter(UtcDatetime)
@@ -51,3 +59,16 @@ def test_add_years_moves_whole_years_both_ways() -> None:
 def test_add_years_turns_leap_day_into_28_february() -> None:
     assert add_years(date(2024, 2, 29), 1) == date(2025, 2, 28)
     assert add_years(date(2024, 2, 29), 4) == date(2028, 2, 29)
+
+
+@pytest.mark.parametrize(
+    ("day", "months", "expected"),
+    [
+        (date(2026, 1, 1), 3, date(2026, 4, 1)),
+        (date(2026, 11, 15), 2, date(2027, 1, 15)),
+        (date(2026, 3, 10), -3, date(2025, 12, 10)),
+        (date(2026, 1, 31), 1, date(2026, 2, 28)),  # past the month's end: last day
+    ],
+)
+def test_add_months_moves_whole_months(day: date, months: int, expected: date) -> None:
+    assert add_months(day, months) == expected
