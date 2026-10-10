@@ -44,6 +44,10 @@ def test_id_sequence_counts_up_from_one() -> None:
     assert IdSequence("TXN", digits=9).next_id() == "TXN-000000001"
 
 
+def test_id_sequence_can_continue_an_existing_table() -> None:
+    assert IdSequence("DEV", start_after=2_500).next_id() == "DEV-0002501"
+
+
 @pytest.mark.parametrize("number", [0, -1, 10_000_000])
 def test_make_id_rejects_numbers_out_of_range(number: int) -> None:
     with pytest.raises(ValueError, match="between 1 and"):

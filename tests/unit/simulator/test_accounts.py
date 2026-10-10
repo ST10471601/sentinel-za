@@ -1,5 +1,3 @@
-from collections import defaultdict
-
 import pytest
 
 from sentinel.domain.accounts import Account, AccountType
@@ -8,14 +6,6 @@ from sentinel.simulator.accounts import CARD_TYPE_BY_ACCOUNT_TYPE, MAX_CREDIT_US
 from sentinel.simulator.reference_data import DEFAULT_SIMULATION_START, ReferenceData
 
 START = DEFAULT_SIMULATION_START
-
-
-@pytest.fixture(scope="module")
-def accounts_by_customer(reference_data: ReferenceData) -> dict[str, list[Account]]:
-    grouped: dict[str, list[Account]] = defaultdict(list)
-    for account in reference_data.accounts:
-        grouped[account.customer_id].append(account)
-    return grouped
 
 
 @pytest.fixture(scope="module")

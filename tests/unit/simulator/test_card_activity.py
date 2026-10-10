@@ -33,22 +33,8 @@ APPROVED = Settlement(TransactionStatus.APPROVED, None, 0)
 
 
 @pytest.fixture(scope="module")
-def index(reference_data: ReferenceData) -> MerchantIndex:
-    return MerchantIndex(reference_data.merchants)
-
-
-@pytest.fixture(scope="module")
 def merchant_by_id(reference_data: ReferenceData) -> dict[str, Merchant]:
     return {merchant.merchant_id: merchant for merchant in reference_data.merchants}
-
-
-@pytest.fixture(scope="module")
-def cards_by_customer(reference_data: ReferenceData) -> dict[str, list[Card]]:
-    owner = {account.account_id: account.customer_id for account in reference_data.accounts}
-    grouped: dict[str, list[Card]] = defaultdict(list)
-    for card in reference_data.cards:
-        grouped[owner[card.account_id]].append(card)
-    return grouped
 
 
 @pytest.fixture(scope="module")

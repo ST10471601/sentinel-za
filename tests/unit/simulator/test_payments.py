@@ -16,7 +16,7 @@ from sentinel.domain.transactions import (
     TransactionAuthMethod,
     TransactionStatus,
 )
-from sentinel.simulator.beneficiaries import PayeeHistory, generate_beneficiaries
+from sentinel.simulator.beneficiaries import PayeeHistory
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.drafts import Settlement, to_transaction
 from sentinel.simulator.identifiers import IdSequence
@@ -30,45 +30,14 @@ from sentinel.simulator.payments import (
     payment_activity,
     plan_payment_habits,
 )
-from sentinel.simulator.recurring import find_main_account
-from sentinel.simulator.reference_data import DEFAULT_SIMULATION_START, ReferenceData
-from sentinel.simulator.sessions import LinkedDevice, group_devices_by_customer
+from sentinel.simulator.reference_data import ReferenceData
+from sentinel.simulator.sessions import LinkedDevice
 from sentinel.simulator.spending import last_pay_date
 
 MARCH = [date(2026, 3, 1) + timedelta(days=offset) for offset in range(31)]
 RICH = 10**12
 APPROVED = Settlement(TransactionStatus.APPROVED, None, 0)
 SAMPLE_SIZE = 150
-
-
-@pytest.fixture(scope="module")
-def accounts_by_customer(reference_data: ReferenceData) -> dict[str, list[Account]]:
-    grouped: dict[str, list[Account]] = defaultdict(list)
-    for account in reference_data.accounts:
-        grouped[account.customer_id].append(account)
-    return grouped
-
-
-@pytest.fixture(scope="module")
-def devices_by_customer(reference_data: ReferenceData) -> dict[str, list[LinkedDevice]]:
-    return group_devices_by_customer(reference_data.devices, reference_data.customer_devices)
-
-
-@pytest.fixture(scope="module")
-def payees(
-    reference_data: ReferenceData,
-    accounts_by_customer: dict[str, list[Account]],
-    devices_by_customer: dict[str, list[LinkedDevice]],
-) -> PayeeHistory:
-    main_accounts = {cid: find_main_account(accts) for cid, accts in accounts_by_customer.items()}
-    return generate_beneficiaries(
-        random.Random(2),
-        reference_data.customers,
-        main_accounts,
-        devices_by_customer,
-        IdSequence("SES"),
-        DEFAULT_SIMULATION_START,
-    )
 
 
 @pytest.fixture(scope="module")
