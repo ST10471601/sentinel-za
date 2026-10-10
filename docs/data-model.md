@@ -167,7 +167,9 @@ Each file's metadata records the seed and simulation start that produced it.
 **Simulated history (batch, until the streaming simulator replays it):** `uv run sentinel simulate history`
 writes the reference data, then `transaction`, `login_session`, `beneficiary`, `beneficiary_event`
 and the `device` and `customer_device` rows added during the period to `data/history/`.
-Rows are written in batches, so memory stays flat however long the run.
+Fraud is injected into the same day-by-day run, so stolen money really leaves balances.
+The ground truth (`scenario_instance`, `transaction_label`) goes to `data/truth/`, apart from
+what the bank can observe. Rows are written in batches, so memory stays flat however long the run.
 
 **Event streams (through the broker):**
 

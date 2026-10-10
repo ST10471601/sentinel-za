@@ -1,4 +1,7 @@
-"""Stream simulated history to Parquet, one file per table, in batches to keep memory low."""
+"""Stream simulated history to Parquet, one file per table, in batches to keep memory low.
+
+Observable tables go to ``history/`` and ground truth to ``truth/``.
+"""
 
 import logging
 from collections.abc import Sequence
@@ -11,11 +14,12 @@ import pyarrow.parquet as pq
 
 from sentinel.domain.base import DomainModel
 from sentinel.simulator.arrow_schema import schema_for
-from sentinel.simulator.history import MODEL_BY_TABLE, HistoryTable
+from sentinel.simulator.history import MODEL_BY_TABLE, TRUTH_TABLES, HistoryTable
 from sentinel.simulator.reference_data import ReferenceData
 from sentinel.simulator.reference_files import COMPRESSION
 
 HISTORY_DIR_NAME = "history"
+TRUTH_DIR_NAME = "truth"
 BATCH_ROWS = 50_000  # rows held in memory per table before they are written
 
 logger = logging.getLogger(__name__)
@@ -31,20 +35,26 @@ def history_metadata(reference: ReferenceData, months: int) -> dict[str, str]:
 
 
 class HistoryWriter:
-    """Writes each table to ``<directory>/<table>.parquet`` as rows arrive.
+    """Writes each table to ``<data_dir>/history|truth/<table>.parquet`` as rows arrive.
 
     Files are written under temporary names and renamed on a clean close, so a failed
     run never replaces the files from the last good run. Use as a context manager.
     """
 
-    def __init__(self, directory: Path, run_metadata: dict[str, str]) -> None:
-        self._directory = directory
+    def __init__(self, data_dir: Path, run_metadata: dict[str, str]) -> None:
+        self._paths = {
+            table: data_dir
+            / (TRUTH_DIR_NAME if table in TRUTH_TABLES else HISTORY_DIR_NAME)
+            / f"{table.value}.parquet"
+            for table in HistoryTable
+        }
         self._run_metadata = run_metadata
         self._buffers: dict[HistoryTable, list[dict[str, object]]] = {t: [] for t in HistoryTable}
         self._writers: dict[HistoryTable, pq.ParquetWriter] = {}
 
     def __enter__(self) -> Self:
-        self._directory.mkdir(parents=True, exist_ok=True)
+        for path in self._paths.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
         return self
 
     def __exit__(
@@ -67,7 +77,7 @@ class HistoryWriter:
 
     def paths(self) -> dict[HistoryTable, Path]:
         """Where each table's file is written."""
-        return {table: self._directory / f"{table.value}.parquet" for table in HistoryTable}
+        return dict(self._paths)
 
     def _flush(self, table: HistoryTable) -> None:
         buffer = self._buffers[table]
@@ -85,8 +95,8 @@ class HistoryWriter:
         for table in HistoryTable:
             self._flush(table)  # also creates empty files, so every table always exists
             self._writers.pop(table).close()
-            self._temporary_path(table).replace(self.paths()[table])
-            logger.debug("wrote %s", self.paths()[table], extra={"table": table.value})
+            self._temporary_path(table).replace(self._paths[table])
+            logger.debug("wrote %s", self._paths[table], extra={"table": table.value})
 
     def _abandon(self) -> None:
         for table, writer in self._writers.items():
@@ -98,4 +108,5 @@ class HistoryWriter:
         return schema_for(MODEL_BY_TABLE[table]).with_metadata(self._run_metadata)
 
     def _temporary_path(self, table: HistoryTable) -> Path:
-        return self._directory / f".{table.value}.parquet.tmp"
+        path = self._paths[table]
+        return path.with_name(f".{path.name}.tmp")

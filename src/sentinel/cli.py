@@ -13,7 +13,7 @@ from sentinel.core.config import Settings, get_settings
 from sentinel.core.errors import ConfigurationError, SimulationError
 from sentinel.core.logs import configure_logging
 from sentinel.simulator.history import simulate_history
-from sentinel.simulator.history_files import HISTORY_DIR_NAME, HistoryWriter, history_metadata
+from sentinel.simulator.history_files import HistoryWriter, history_metadata
 from sentinel.simulator.reference_data import (
     DEFAULT_CUSTOMER_COUNT,
     ReferenceData,
@@ -83,14 +83,12 @@ def simulate_history_command(
     ),
     seed: SeedOption = None,
 ) -> None:
-    """Generate reference data, then months of everyday activity, as Parquet files."""
+    """Generate reference data, then months of activity with fraud, as Parquet files."""
     settings = load_settings()
     reference_data = _generate_reference(seed if seed is not None else settings.seed, customers)
     _write_reference(reference_data, settings.data_dir)
 
-    writer = HistoryWriter(
-        settings.data_dir / HISTORY_DIR_NAME, history_metadata(reference_data, months)
-    )
+    writer = HistoryWriter(settings.data_dir, history_metadata(reference_data, months))
     try:
         with writer:
             summary = simulate_history(reference_data, months, writer)
@@ -103,6 +101,7 @@ def simulate_history_command(
     for table, count in summary.row_counts.items():
         typer.echo(f"{table.value:<18}{count:>10,} rows  {paths[table]}")
     typer.echo(f"declined transactions: {summary.declined_count:,}")
+    typer.echo(f"fraud transactions: {summary.fraud_count:,}")
 
 
 def _generate_reference(seed: int, customers: int) -> ReferenceData:

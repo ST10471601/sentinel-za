@@ -9,8 +9,10 @@ from sentinel.domain.accounts import AccountType
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary
 from sentinel.domain.devices import Device
+from sentinel.domain.labels import FraudType, ScenarioInstance, TransactionLabel
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.transactions import Channel, Direction, Transaction, TransactionStatus
+from sentinel.simulator.fraud.planning import FraudSettings
 from sentinel.simulator.history import HistorySummary, HistoryTable, simulate_history
 from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
 
@@ -30,6 +32,14 @@ class CollectedRows:
 
     def transactions(self) -> list[Transaction]:
         return [row for row in self.rows[HistoryTable.TRANSACTION] if isinstance(row, Transaction)]
+
+    def labels(self) -> list[TransactionLabel]:
+        rows = self.rows[HistoryTable.TRANSACTION_LABEL]
+        return [row for row in rows if isinstance(row, TransactionLabel)]
+
+    def scenarios(self) -> list[ScenarioInstance]:
+        rows = self.rows[HistoryTable.SCENARIO_INSTANCE]
+        return [row for row in rows if isinstance(row, ScenarioInstance)]
 
 
 @pytest.fixture(scope="module")
@@ -173,6 +183,47 @@ def test_same_seed_gives_the_same_history() -> None:
         return sink.transactions()
 
     assert small_run() == small_run()
+
+
+def test_every_transaction_has_exactly_one_label(
+    run: tuple[HistorySummary, CollectedRows], transactions: list[Transaction]
+) -> None:
+    labels = run[1].labels()
+    assert sorted(label.transaction_id for label in labels) == [
+        t.transaction_id for t in transactions
+    ]
+    assert run[0].fraud_count == sum(label.is_fraud for label in labels) > 0
+
+
+def test_fraud_labels_match_their_episodes(
+    run: tuple[HistorySummary, CollectedRows], transactions: list[Transaction]
+) -> None:
+    by_id = {t.transaction_id: t for t in transactions}
+    scenarios = {s.scenario_id: s for s in run[1].scenarios()}
+    stolen: Counter[str] = Counter()
+
+    for label in run[1].labels():
+        if not label.is_fraud:
+            continue
+        assert label.scenario_id is not None
+        scenario = scenarios[label.scenario_id]
+        transaction = by_id[label.transaction_id]
+        assert label.fraud_type is scenario.fraud_type is FraudType.CARD_NOT_PRESENT
+        assert scenario.started_at <= transaction.event_time <= scenario.ended_at
+        if transaction.status is TransactionStatus.APPROVED:
+            stolen[label.scenario_id] += transaction.amount_cents
+
+    for scenario_id, scenario in scenarios.items():
+        assert scenario.total_amount_cents == stolen[scenario_id]
+
+
+def test_fraud_can_be_switched_off(reference: ReferenceData) -> None:
+    sink = CollectedRows()
+    summary = simulate_history(reference, MONTHS, sink, FraudSettings(0.0))
+
+    assert summary.fraud_count == 0
+    assert not sink.scenarios()
+    assert not any(label.is_fraud for label in sink.labels())
 
 
 def test_months_must_be_positive(reference: ReferenceData) -> None:
