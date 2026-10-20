@@ -3,8 +3,9 @@
 import random
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
+from typing import Self
 
 from sentinel.domain.accounts import Card, CardType
 from sentinel.domain.customers import Customer
@@ -58,6 +59,14 @@ class CardHabits:
     credit_card: Card | None
     options: Mapping[MerchantCategory, tuple[Merchant, ...]]  # every merchant they'd use
     favourites: Mapping[MerchantCategory, tuple[Merchant, ...]]  # the ones they return to
+
+    def with_replacement(self, old_card_id: str, new_card: Card) -> Self:
+        """The same habits, with a replacement card in place of the old one."""
+        if self.debit_card.card_id == old_card_id:
+            return replace(self, debit_card=new_card)
+        if self.credit_card is not None and self.credit_card.card_id == old_card_id:
+            return replace(self, credit_card=new_card)
+        raise ValueError(f"{old_card_id} is not one of this customer's cards")
 
 
 class MerchantIndex:

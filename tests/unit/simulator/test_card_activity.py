@@ -218,3 +218,22 @@ def test_customer_without_a_debit_card_is_a_data_error(
 
 def test_same_seed_gives_the_same_activity(sample: list[tuple[Customer, CardHabits]]) -> None:
     assert month_of_drafts(sample[:10], seed=3) == month_of_drafts(sample[:10], seed=3)
+
+
+def test_a_replacement_card_takes_the_old_cards_place(
+    sample: list[tuple[Customer, CardHabits]],
+) -> None:
+    habits = next(h for _, h in sample if h.credit_card is not None)
+    assert habits.credit_card is not None
+    new_debit = habits.debit_card.model_copy(update={"card_id": "CRD-9999998"})
+    new_credit = habits.credit_card.model_copy(update={"card_id": "CRD-9999999"})
+
+    swapped = habits.with_replacement(habits.debit_card.card_id, new_debit)
+    assert (swapped.debit_card, swapped.credit_card) == (new_debit, habits.credit_card)
+    assert swapped.favourites == habits.favourites
+
+    swapped = habits.with_replacement(habits.credit_card.card_id, new_credit)
+    assert (swapped.debit_card, swapped.credit_card) == (habits.debit_card, new_credit)
+
+    with pytest.raises(ValueError, match="not one of this customer's cards"):
+        habits.with_replacement("CRD-9999997", new_debit)

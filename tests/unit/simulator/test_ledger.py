@@ -175,3 +175,24 @@ def test_debit_orders_have_no_daily_limit(ledger: Ledger) -> None:
 def test_card_channel_draft_without_a_card_is_a_bug(ledger: Ledger) -> None:
     with pytest.raises(ValueError, match="no card_id"):
         ledger.settle(purchase(card_id=None))
+
+
+def test_blocked_card_is_declined_even_with_money_and_limit_to_spare(ledger: Ledger) -> None:
+    ledger.block_card(DEBIT_CARD.card_id)
+
+    settlement = ledger.settle(purchase(amount_cents=1_000))
+    assert settlement.status is TransactionStatus.DECLINED
+    assert settlement.decline_reason is DeclineReason.CARD_BLOCKED
+    assert ledger.balance_cents(CHEQUE.account_id) == 500_000
+    # Payments from the same account don't use the card, so they still go through.
+    eft = purchase(channel=Channel.EFT, card_id=None, merchant_id=None, entry_mode=None)
+    assert ledger.settle(eft).status is TransactionStatus.APPROVED
+
+
+def test_a_new_card_is_accepted_with_its_own_limits(ledger: Ledger) -> None:
+    replacement = DEBIT_CARD.model_copy(update={"card_id": "CRD-0000003"})
+    ledger.block_card(DEBIT_CARD.card_id)
+    ledger.add_card(replacement)
+
+    settlement = ledger.settle(purchase(card_id=replacement.card_id))
+    assert settlement.status is TransactionStatus.APPROVED

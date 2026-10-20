@@ -92,6 +92,7 @@ class CardNotPresent:
                 "merchants": len(merchants),
             },
             drafts=tuple(drafts),
+            card_id=card.card_id,
         )
 
     def _pick_merchants(

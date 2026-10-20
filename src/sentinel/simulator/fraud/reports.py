@@ -6,7 +6,9 @@ Deciding up front lets the bank act on a report during the run, such as blocking
 import random
 from datetime import datetime, timedelta
 
+from sentinel.domain.accounts import CardEventType
 from sentinel.domain.labels import FraudType
+from sentinel.simulator.card_replacement import CardBlock
 from sentinel.simulator.fraud.episodes import Episode
 from sentinel.simulator.randomness import chance
 
@@ -35,3 +37,10 @@ def plan_reported_at(
     low, high = REPORT_DELAY_DAYS[episode.fraud_type]
     delay = round(rng.uniform(low, high) * SECONDS_PER_DAY)
     return episode.planned_end() + timedelta(seconds=delay)
+
+
+def plan_card_block(episode: Episode, reported_at: datetime | None) -> CardBlock | None:
+    """The bank blocks the card the moment card fraud is reported."""
+    if episode.card_id is None or reported_at is None:
+        return None
+    return CardBlock(episode.card_id, reported_at, CardEventType.BLOCKED)

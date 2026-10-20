@@ -22,6 +22,7 @@ It is the contract between the simulator, the pipeline, the models and the analy
 erDiagram
     CUSTOMER ||--o{ ACCOUNT : owns
     ACCOUNT ||--o{ CARD : has
+    CARD ||--o{ CARD_EVENT : "history of"
     CUSTOMER ||--o{ CUSTOMER_DEVICE : uses
     DEVICE ||--o{ CUSTOMER_DEVICE : "linked via"
     CUSTOMER ||--o{ SIM_SWAP_EVENT : "subject of"
@@ -53,6 +54,11 @@ erDiagram
         string account_id FK
         string card_type
         string pan_last4
+    }
+    CARD_EVENT {
+        string card_event_id PK
+        string card_id FK
+        string event_type
     }
     DEVICE {
         string device_id PK
@@ -165,8 +171,8 @@ erDiagram
 Each file's metadata records the seed and simulation start that produced it.
 
 **Simulated history (batch, until the streaming simulator replays it):** `uv run sentinel simulate history`
-writes the reference data, then `transaction`, `login_session`, `beneficiary`, `beneficiary_event`
-and the `device` and `customer_device` rows added during the period to `data/history/`.
+writes the reference data, then `transaction`, `login_session`, `beneficiary`, `beneficiary_event`,
+`card_event`, and the `device`, `customer_device` and `card` rows added during the period to `data/history/`.
 Fraud is injected into the same day-by-day run, so stolen money really leaves balances.
 The ground truth (`scenario_instance`, `transaction_label`) goes to `data/truth/`, apart from
 what the bank can observe. Rows are written in batches, so memory stays flat however long the run.
@@ -179,6 +185,7 @@ what the bank can observe. Rows are written in batches, so memory stays flat how
 | `logins.raw` | `login_session` |
 | `sim_swaps.raw` | `sim_swap_event` |
 | `beneficiaries.raw` | `beneficiary_event` |
+| `cards.raw` | `card_event` |
 
 ## Data dictionary
 
@@ -226,6 +233,8 @@ One row per bank customer (individual or business).
 ### card
 
 Full card numbers are never stored (PCI DSS practice): only a token and the last 4 digits.
+Reference rows are a snapshot at the simulation start. Replacement cards issued during the run are
+added to `data/history/card.parquet`, and every later change is a `card_event`.
 
 | Column | Type | PII | Description |
 |---|---|---|---|
@@ -239,6 +248,19 @@ Full card numbers are never stored (PCI DSS practice): only a token and the last
 | status | string | | `active`, `blocked`, `reported_lost` |
 | daily_atm_limit_cents | bigint | | |
 | daily_pos_limit_cents | bigint | | |
+
+### card_event
+
+When a card is blocked or replaced. Fraud reported on a card blocks it at once; a replacement on the
+same account follows 2 to 7 days later.
+
+| Column | Type | PII | Description |
+|---|---|---|---|
+| card_event_id | string | | PK. `CEV-0000001` |
+| card_id | string | | FK → card |
+| event_type | string | | `blocked` (fraud reported), `reported_lost`, `issued` (a replacement) |
+| event_time | timestamp | | |
+| replaces_card_id | string | | FK → card. The blocked card, for `issued` events only |
 
 ### device
 
@@ -360,7 +382,7 @@ The core event. One row per entry posted to an account. Internal transfers produ
 | terminal_lat, terminal_lon | double | | Card-present location (nullable) |
 | country_code | string | | Where the transaction happened |
 | status | string | | `approved` or `declined` |
-| decline_reason | string | | `insufficient_funds` or `limit_exceeded` (nullable) |
+| decline_reason | string | | `insufficient_funds`, `limit_exceeded` or `card_blocked` (nullable) |
 | balance_after_cents | bigint | | Account balance after posting |
 | schema_version | int | | Event schema version, starts at `1` |
 
