@@ -1,5 +1,6 @@
 """Seeded random streams and sampling helpers used by every generator."""
 
+import math
 import random
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
@@ -27,6 +28,12 @@ def pick[T](rng: random.Random, weights: Mapping[T, float]) -> T:
 def chance(rng: random.Random, probability: float) -> bool:
     """Return True with the given probability."""
     return rng.random() < probability
+
+
+def log_uniform_int(rng: random.Random, bounds: tuple[int, int]) -> int:
+    """Small values are more common than large ones, but every size in ``bounds`` is possible."""
+    low, high = bounds
+    return round(math.exp(rng.uniform(math.log(low), math.log(high))))
 
 
 def draw_unique[T](make_value: Callable[[], T], used: set[T]) -> T:

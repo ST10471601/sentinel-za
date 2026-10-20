@@ -93,11 +93,13 @@ class MerchantIndex:
         With neither, the nearest few shops of that category elsewhere.
         """
         options = self._by_city[(customer.home_city, category)] + self._online[category]
-        if options:
-            return options
+        return options or self.nearest(customer, category, NEAREST_MERCHANT_COUNT)
+
+    def nearest(self, customer: Customer, category: MerchantCategory, count: int) -> list[Merchant]:
+        """The ``count`` shops or ATMs of a category closest to the customer's home."""
         return sorted(
             self._physical[category], key=lambda merchant: _distance_score(merchant, customer)
-        )[:NEAREST_MERCHANT_COUNT]
+        )[:count]
 
 
 def plan_card_habits(
@@ -147,7 +149,8 @@ def card_drafts(
         atm = _pick_merchant(rng, habits, MerchantCategory.ATM)
         amount = atm_amount(rng, customer.income_band)
         if budget.try_spend(habits.debit_card.account_id, amount):
-            drafts.append(_withdrawal(rng, habits.debit_card, atm, amount, day))
+            event_time = pick_event_time(rng, day)
+            drafts.append(atm_withdrawal_draft(habits.debit_card, atm, amount, event_time))
 
     return drafts
 
@@ -166,6 +169,13 @@ def purchase_draft(
         return online_purchase_draft(card, merchant, amount_cents, event_time)
 
     is_contactless = chance(rng, contactless_share)
+    return store_purchase_draft(card, merchant, amount_cents, event_time, is_contactless)
+
+
+def store_purchase_draft(
+    card: Card, merchant: Merchant, amount_cents: int, event_time: datetime, is_contactless: bool
+) -> TransactionDraft:
+    """A purchase at a shop's terminal. Contactless taps need no PIN up to the limit."""
     needs_pin = not is_contactless or amount_cents > CONTACTLESS_NO_PIN_LIMIT_CENTS
     return TransactionDraft(
         account_id=card.account_id,
@@ -204,14 +214,15 @@ def online_purchase_draft(
     )
 
 
-def _withdrawal(
-    rng: random.Random, card: Card, atm: Merchant, amount_cents: int, day: date
+def atm_withdrawal_draft(
+    card: Card, atm: Merchant, amount_cents: int, event_time: datetime
 ) -> TransactionDraft:
+    """A cash withdrawal at an ATM, with the card's chip and PIN."""
     return TransactionDraft(
         account_id=card.account_id,
         direction=Direction.DEBIT,
         amount_cents=amount_cents,
-        event_time=pick_event_time(rng, day),
+        event_time=event_time,
         channel=Channel.ATM,
         auth_method=TransactionAuthMethod.PIN,
         country_code=HOME_COUNTRY,

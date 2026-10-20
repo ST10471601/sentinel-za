@@ -4,7 +4,6 @@ Shape (SABRIC 2025, see SZ-3): one to three small test charges, then a burst of 
 charges within hours. About two-thirds of the losses are abroad.
 """
 
-import math
 import random
 from collections import defaultdict
 from collections.abc import Sequence
@@ -17,7 +16,7 @@ from sentinel.domain.merchants import Merchant, MerchantCategory
 from sentinel.simulator.card_activity import HOME_COUNTRY, online_purchase_draft
 from sentinel.simulator.drafts import TransactionDraft
 from sentinel.simulator.fraud.episodes import ScriptedEpisode, Victim
-from sentinel.simulator.randomness import chance
+from sentinel.simulator.randomness import chance, log_uniform_int
 
 FOREIGN_SHARE = 0.65  # 67.5% of credit and 63.5% of debit CNP losses are abroad
 CREDIT_CARD_SHARE = 0.6  # credit cards lose slightly more to CNP, though fewer people have one
@@ -75,7 +74,7 @@ class CardNotPresent:
         moment = start
         for number in range(test_count + main_count):
             is_test = number < test_count
-            amount = _log_uniform_cents(rng, TEST_AMOUNT_CENTS if is_test else MAIN_AMOUNT_CENTS)
+            amount = log_uniform_int(rng, TEST_AMOUNT_CENTS if is_test else MAIN_AMOUNT_CENTS)
             drafts.append(online_purchase_draft(card, rng.choice(merchants), amount, moment))
             gap = TEST_GAP_SECONDS if is_test else MAIN_GAP_SECONDS
             moment += timedelta(seconds=rng.randint(*gap))
@@ -117,9 +116,3 @@ def _pick_card(rng: random.Random, cards: Sequence[Card]) -> Card:
         if card.card_type is CardType.DEBIT:
             return card
     raise SimulationError("victim has no debit card")
-
-
-def _log_uniform_cents(rng: random.Random, bounds: tuple[int, int]) -> int:
-    """Small amounts are more common than large ones, but every size is possible."""
-    low, high = bounds
-    return round(math.exp(rng.uniform(math.log(low), math.log(high))))

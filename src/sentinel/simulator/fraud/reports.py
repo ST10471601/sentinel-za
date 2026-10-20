@@ -40,7 +40,10 @@ def plan_reported_at(
 
 
 def plan_card_block(episode: Episode, reported_at: datetime | None) -> CardBlock | None:
-    """The bank blocks the card the moment card fraud is reported."""
+    """The bank blocks the card when the victim reports it lost, or when card fraud is reported."""
+    loss = episode.card_loss
+    if loss is not None:
+        return CardBlock(loss.card_id, loss.reported_lost_at, CardEventType.REPORTED_LOST)
     if episode.card_id is None or reported_at is None:
         return None
     return CardBlock(episode.card_id, reported_at, CardEventType.BLOCKED)
