@@ -59,6 +59,10 @@ class Episode(Protocol):
     def params(self) -> Mapping[str, ParamValue]:
         """The choices made when planning, stored for reproducibility."""
 
+    @property
+    def card_id(self) -> str | None:
+        """The card the fraud uses, blocked when the fraud is reported. None if no card."""
+
     def days(self) -> frozenset[date]:
         """SA calendar days on which the fraudster acts."""
 
@@ -94,6 +98,7 @@ class ScriptedEpisode:
     victim_customer_id: str
     params: Mapping[str, ParamValue]
     drafts: tuple[TransactionDraft, ...]
+    card_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.drafts:

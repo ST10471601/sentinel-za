@@ -72,6 +72,7 @@ class DeclineReason(StrEnum):
 
     INSUFFICIENT_FUNDS = "insufficient_funds"
     LIMIT_EXCEEDED = "limit_exceeded"
+    CARD_BLOCKED = "card_blocked"
 
 
 CARD_CHANNELS = frozenset({Channel.CARD_PRESENT, Channel.CARD_NOT_PRESENT, Channel.ATM})

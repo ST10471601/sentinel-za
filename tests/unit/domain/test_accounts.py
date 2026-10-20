@@ -3,7 +3,16 @@ from datetime import UTC, date, datetime
 import pytest
 from pydantic import ValidationError
 
-from sentinel.domain.accounts import Account, AccountStatus, AccountType, Card, CardStatus, CardType
+from sentinel.domain.accounts import (
+    Account,
+    AccountStatus,
+    AccountType,
+    Card,
+    CardEvent,
+    CardEventType,
+    CardStatus,
+    CardType,
+)
 
 
 def account_fields(**overrides: object) -> dict[str, object]:
@@ -96,3 +105,26 @@ def test_card_must_expire_after_issue_date() -> None:
 def test_malformed_card_fields_are_rejected(overrides: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         Card.model_validate(card_fields(**overrides))
+
+
+def card_event(event_type: CardEventType, replaces_card_id: str | None) -> CardEvent:
+    return CardEvent(
+        card_event_id="CEV-0000001",
+        card_id="CRD-0000002",
+        event_type=event_type,
+        event_time=datetime(2026, 3, 6, 8, 0, tzinfo=UTC),
+        replaces_card_id=replaces_card_id,
+    )
+
+
+def test_issued_card_event_names_the_card_it_replaces() -> None:
+    assert card_event(CardEventType.ISSUED, "CRD-0000001").replaces_card_id == "CRD-0000001"
+    with pytest.raises(ValidationError, match="issued events only"):
+        card_event(CardEventType.ISSUED, None)
+
+
+@pytest.mark.parametrize("event_type", [CardEventType.BLOCKED, CardEventType.REPORTED_LOST])
+def test_blocks_replace_nothing(event_type: CardEventType) -> None:
+    assert card_event(event_type, None).replaces_card_id is None
+    with pytest.raises(ValidationError, match="issued events only"):
+        card_event(event_type, "CRD-0000001")

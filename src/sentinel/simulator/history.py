@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from sentinel.core.datetimes import add_months, to_sast
-from sentinel.domain.accounts import Account, Card, CardType
+from sentinel.domain.accounts import Account, Card, CardEvent, CardType
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.customers import Customer
@@ -26,12 +26,13 @@ from sentinel.simulator.card_activity import (
     card_drafts,
     plan_card_habits,
 )
+from sentinel.simulator.card_replacement import CardBlock, CardReplacements, Replacement
 from sentinel.simulator.drafts import TransactionDraft, to_transaction
 from sentinel.simulator.fraud.card_not_present import CardNotPresent
 from sentinel.simulator.fraud.episodes import Episode, FraudAction, Scenario, Victim
 from sentinel.simulator.fraud.ground_truth import GroundTruth, normal_labels
 from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
-from sentinel.simulator.fraud.reports import plan_reported_at
+from sentinel.simulator.fraud.reports import plan_card_block, plan_reported_at
 from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.ledger import Ledger
 from sentinel.simulator.payments import (
@@ -82,6 +83,8 @@ class HistoryTable(StrEnum):
     BENEFICIARY_EVENT = "beneficiary_event"
     DEVICE = "device"  # devices registered during the simulation
     CUSTOMER_DEVICE = "customer_device"
+    CARD = "card"  # replacement cards issued during the simulation
+    CARD_EVENT = "card_event"
     SCENARIO_INSTANCE = "scenario_instance"
     TRANSACTION_LABEL = "transaction_label"
 
@@ -93,6 +96,8 @@ MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
     HistoryTable.BENEFICIARY_EVENT: BeneficiaryEvent,
     HistoryTable.DEVICE: Device,
     HistoryTable.CUSTOMER_DEVICE: CustomerDevice,
+    HistoryTable.CARD: Card,
+    HistoryTable.CARD_EVENT: CardEvent,
     HistoryTable.SCENARIO_INSTANCE: ScenarioInstance,
     HistoryTable.TRANSACTION_LABEL: TransactionLabel,
 }
@@ -127,7 +132,7 @@ class _FraudAttempt:
     action: FraudAction
 
 
-type _Planned = TransactionDraft | PlannedPayment | _FraudAttempt
+type _Planned = TransactionDraft | PlannedPayment | _FraudAttempt | CardBlock
 
 
 @dataclass(slots=True)
@@ -142,6 +147,15 @@ class _CustomerPlan:
     events: tuple[UnusualEvent, ...]
     events_by_day: dict[date, list[DayEvent]]  # everything except trips, by day
     trip_habits: dict[Trip, CardHabits] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class _FraudPlan:
+    """Fraud episodes and the card blocks their reports trigger, by SA day."""
+
+    ground_truth: GroundTruth
+    episodes_by_day: dict[date, list[Episode]] = field(default_factory=lambda: defaultdict(list))
+    blocks_by_day: dict[date, list[CardBlock]] = field(default_factory=lambda: defaultdict(list))
 
 
 @dataclass(slots=True)
@@ -227,7 +241,21 @@ class _Simulation:
             )
             for customer in reference.customers
         ]
-        self._ground_truth, self._episodes_by_day = self._plan_fraud(reference, months, fraud)
+        self._plan_by_card = {card.card_id: plan for plan in self._plans for card in plan.cards}
+        self._replacements = CardReplacements(
+            make_rng(reference.seed, "cards"),
+            reference.cards,
+            IdSequence("CRD", start_after=len(reference.cards)),
+            IdSequence("CEV"),
+        )
+        self._fraud = self._plan_fraud(reference, months, fraud)
+        # When the owner stops using a blocked card, and starts using its replacement.
+        self._blocked_from = {
+            block.card_id: block.blocked_at
+            for blocks in self._fraud.blocks_by_day.values()
+            for block in blocks
+        }
+        self._issued_at: dict[str, datetime] = {}
 
     def run(self) -> HistorySummary:
         """Simulate every day in order and send the rows to the sink."""
@@ -236,7 +264,7 @@ class _Simulation:
             self._run_day(day)
             day += timedelta(days=1)
 
-        instances, fraud_labels = self._ground_truth.finish()
+        instances, fraud_labels = self._fraud.ground_truth.finish()
         self._emit(HistoryTable.SCENARIO_INSTANCE, instances)
         self._emit(HistoryTable.TRANSACTION_LABEL, fraud_labels)
 
@@ -251,8 +279,8 @@ class _Simulation:
 
     def _plan_fraud(
         self, reference: ReferenceData, months: int, fraud: FraudSettings
-    ) -> tuple[GroundTruth, dict[date, list[Episode]]]:
-        """Pick fraud episodes and victims up front, as unusual events are."""
+    ) -> _FraudPlan:
+        """Pick fraud episodes, victims and report times up front, as unusual events are."""
         scenarios: list[Scenario] = [CardNotPresent(reference.merchants)]
         victims = [Victim(plan.customer, plan.cards, plan.payments) for plan in self._plans]
         episodes = plan_episodes(
@@ -265,14 +293,17 @@ class _Simulation:
         )
 
         report_rng = make_rng(reference.seed, "fraud-reports")
-        ground_truth = GroundTruth()
-        episodes_by_day: dict[date, list[Episode]] = defaultdict(list)
+        plan = _FraudPlan(GroundTruth())
         for episode in episodes:
             reported_at = plan_reported_at(report_rng, episode, fraud.unreported_share)
-            ground_truth.add_episode(episode, reported_at)
+            plan.ground_truth.add_episode(episode, reported_at)
             for day in episode.days():
-                episodes_by_day[day].append(episode)
-        return ground_truth, episodes_by_day
+                plan.episodes_by_day[day].append(episode)
+
+            block = plan_card_block(episode, reported_at)
+            if block is not None:
+                plan.blocks_by_day[to_sast(block.blocked_at).date()].append(block)
+        return plan
 
     def _plan_customer(
         self,
@@ -303,9 +334,12 @@ class _Simulation:
 
     def _run_day(self, day: date) -> None:
         output = _DayOutput()
+        self._issue_replacements(day)
         for plan in self._plans:
             self._customer_day(plan, day, output)
-        for episode in self._episodes_by_day.get(day, []):
+        output.planned = [item for item in output.planned if self._owner_can_use(item)]
+        output.planned += self._fraud.blocks_by_day.get(day, [])
+        for episode in self._fraud.episodes_by_day.get(day, []):
             actions = episode.act(day, self._ledger)
             output.planned += [_FraudAttempt(episode.scenario_id, a) for a in actions.attempts]
 
@@ -317,6 +351,29 @@ class _Simulation:
         transactions, normal = self._settle(output.planned)
         self._emit(HistoryTable.TRANSACTION, transactions)
         self._emit(HistoryTable.TRANSACTION_LABEL, normal_labels(normal))
+
+    def _issue_replacements(self, day: date) -> None:
+        """Hand out new cards due today; their owners switch to them straight away."""
+        replacements = self._replacements.issue_due(day)
+        for replacement in replacements:
+            card = replacement.card
+            self._ledger.add_card(card)
+            self._issued_at[card.card_id] = card.issued_at
+            plan = self._plan_by_card.pop(replacement.replaced_card_id)
+            self._plan_by_card[card.card_id] = plan
+            _switch_card(plan, replacement)
+        self._emit(HistoryTable.CARD, [r.card for r in replacements])
+        self._emit(HistoryTable.CARD_EVENT, [r.event for r in replacements])
+
+    def _owner_can_use(self, item: _Planned) -> bool:
+        """Customers don't use a card once it is blocked, or before its replacement arrives."""
+        if not isinstance(item, TransactionDraft) or item.card_id is None:
+            return True
+        blocked_from = self._blocked_from.get(item.card_id)
+        if blocked_from is not None and item.event_time >= blocked_from:
+            return False
+        issued_at = self._issued_at.get(item.card_id)
+        return issued_at is None or item.event_time >= issued_at
 
     def _customer_day(self, plan: _CustomerPlan, day: date, output: _DayOutput) -> None:
         rng = self._rng
@@ -420,9 +477,13 @@ class _Simulation:
         transactions: list[Transaction] = []
         normal: list[Transaction] = []
         for item in planned:
+            if isinstance(item, CardBlock):
+                self._ledger.block_card(item.card_id)
+                self._emit(HistoryTable.CARD_EVENT, [self._replacements.block(item)])
+                continue
             if isinstance(item, _FraudAttempt):
                 settled = self._settle_action(item.action)
-                self._ground_truth.record(item.scenario_id, settled)
+                self._fraud.ground_truth.record(item.scenario_id, settled)
             else:
                 settled = self._settle_action(item)
                 normal += settled
@@ -452,9 +513,22 @@ class _Simulation:
 
 
 def _event_time(item: _Planned) -> datetime:
+    if isinstance(item, CardBlock):
+        return item.blocked_at
     if isinstance(item, _FraudAttempt):
         return _event_time(item.action)
     return item.debit.event_time if isinstance(item, PlannedPayment) else item.event_time
+
+
+def _switch_card(plan: _CustomerPlan, replacement: Replacement) -> None:
+    """Swap the replacement in wherever the customer's plan holds the old card."""
+    old_card_id, card = replacement.replaced_card_id, replacement.card
+    plan.cards = tuple(card if c.card_id == old_card_id else c for c in plan.cards)
+    plan.card_habits = plan.card_habits.with_replacement(old_card_id, card)
+    plan.trip_habits = {
+        trip: habits.with_replacement(old_card_id, card)
+        for trip, habits in plan.trip_habits.items()
+    }
 
 
 def _card_for_big_purchase(cards: Sequence[Card]) -> Card:

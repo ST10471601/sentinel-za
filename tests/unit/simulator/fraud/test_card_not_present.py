@@ -50,6 +50,7 @@ def test_episode_is_test_charges_then_a_burst_on_one_card(
         assert {d.channel for d in drafts} == {Channel.CARD_NOT_PRESENT}
         assert len({d.card_id for d in drafts}) == 1
         assert drafts[0].card_id in {card.card_id for card in victim.cards}
+        assert episode.card_id == drafts[0].card_id  # blocked when reported
 
         for draft in drafts[:test_count]:
             assert TEST_AMOUNT_CENTS[0] <= draft.amount_cents <= TEST_AMOUNT_CENTS[1]

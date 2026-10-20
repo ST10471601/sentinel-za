@@ -5,13 +5,20 @@ from datetime import timedelta
 import pytest
 
 from sentinel.core.datetimes import to_sast
-from sentinel.domain.accounts import AccountType
+from sentinel.domain.accounts import AccountType, Card, CardEvent, CardEventType
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary
 from sentinel.domain.devices import Device
 from sentinel.domain.labels import FraudType, ScenarioInstance, TransactionLabel
 from sentinel.domain.sessions import LoginSession
-from sentinel.domain.transactions import Channel, Direction, Transaction, TransactionStatus
+from sentinel.domain.transactions import (
+    Channel,
+    DeclineReason,
+    Direction,
+    Transaction,
+    TransactionStatus,
+)
+from sentinel.simulator.card_replacement import REPLACEMENT_DAYS
 from sentinel.simulator.fraud.planning import FraudSettings
 from sentinel.simulator.history import HistorySummary, HistoryTable, simulate_history
 from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
@@ -40,6 +47,12 @@ class CollectedRows:
     def scenarios(self) -> list[ScenarioInstance]:
         rows = self.rows[HistoryTable.SCENARIO_INSTANCE]
         return [row for row in rows if isinstance(row, ScenarioInstance)]
+
+    def cards(self) -> list[Card]:
+        return [row for row in self.rows[HistoryTable.CARD] if isinstance(row, Card)]
+
+    def card_events(self) -> list[CardEvent]:
+        return [row for row in self.rows[HistoryTable.CARD_EVENT] if isinstance(row, CardEvent)]
 
 
 @pytest.fixture(scope="module")
@@ -164,7 +177,7 @@ def test_references_point_at_rows_that_exist(
     }
     new_devices = {d.device_id for d in rows[HistoryTable.DEVICE] if isinstance(d, Device)}
     devices = {d.device_id for d in reference.devices} | new_devices
-    cards = {c.card_id for c in reference.cards}
+    cards = {c.card_id for c in reference.cards} | {c.card_id for c in run[1].cards()}
     merchants = {m.merchant_id for m in reference.merchants}
 
     assert len(sessions) == len(rows[HistoryTable.LOGIN_SESSION])  # IDs are unique
@@ -229,3 +242,71 @@ def test_fraud_can_be_switched_off(reference: ReferenceData) -> None:
 def test_months_must_be_positive(reference: ReferenceData) -> None:
     with pytest.raises(ValueError, match="at least 1"):
         simulate_history(reference, 0, CollectedRows())
+
+
+@pytest.fixture(scope="module")
+def fraud_heavy_run(reference: ReferenceData) -> CollectedRows:
+    """Far more fraud than usual, all reported, so plenty of cards are blocked and replaced."""
+    sink = CollectedRows()
+    simulate_history(reference, 2, sink, FraudSettings(300.0, unreported_share=0.0))
+    return sink
+
+
+def test_reported_card_fraud_blocks_the_card_that_was_used(fraud_heavy_run: CollectedRows) -> None:
+    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    fraud_cards = {
+        t.card_id for t in fraud_heavy_run.transactions() if t.transaction_id in fraud_ids
+    }
+    blocked = [e for e in fraud_heavy_run.card_events() if e.event_type is CardEventType.BLOCKED]
+
+    assert blocked
+    assert {event.card_id for event in blocked} <= fraud_cards
+
+
+def test_each_blocked_card_is_replaced_on_the_same_account(
+    reference: ReferenceData, fraud_heavy_run: CollectedRows
+) -> None:
+    events = fraud_heavy_run.card_events()
+    blocked_at = {e.card_id: e.event_time for e in events if e.event_type is CardEventType.BLOCKED}
+    issued = [e for e in events if e.event_type is CardEventType.ISSUED]
+    all_cards = {c.card_id: c for c in [*reference.cards, *fraud_heavy_run.cards()]}
+
+    assert issued
+    assert len(fraud_heavy_run.cards()) == len(issued)
+    for event in issued:
+        assert event.replaces_card_id is not None
+        new, old = all_cards[event.card_id], all_cards[event.replaces_card_id]
+        assert (new.account_id, new.card_type) == (old.account_id, old.card_type)
+        days = (to_sast(new.issued_at).date() - to_sast(blocked_at[old.card_id]).date()).days
+        assert REPLACEMENT_DAYS[0] <= days <= REPLACEMENT_DAYS[1]
+
+
+def test_owners_stop_using_a_blocked_card_and_move_to_the_new_one(
+    fraud_heavy_run: CollectedRows,
+) -> None:
+    events = fraud_heavy_run.card_events()
+    blocked_at = {e.card_id: e.event_time for e in events if e.event_type is CardEventType.BLOCKED}
+    issued_at = {c.card_id: c.issued_at for c in fraud_heavy_run.cards()}
+    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    used_replacements = set()
+
+    for t in fraud_heavy_run.transactions():
+        if t.transaction_id in fraud_ids or t.card_id is None:
+            continue
+        if t.card_id in blocked_at:
+            assert t.event_time < blocked_at[t.card_id]
+        if t.card_id in issued_at:
+            assert t.event_time >= issued_at[t.card_id]
+            used_replacements.add(t.card_id)
+        assert t.decline_reason is not DeclineReason.CARD_BLOCKED
+
+    assert used_replacements
+
+
+def test_unreported_fraud_leaves_cards_alone(reference: ReferenceData) -> None:
+    sink = CollectedRows()
+    simulate_history(reference, MONTHS, sink, FraudSettings(300.0, unreported_share=1.0))
+
+    assert sink.scenarios()
+    assert not sink.card_events()
+    assert not sink.cards()

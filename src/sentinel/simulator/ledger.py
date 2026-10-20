@@ -19,6 +19,7 @@ class Ledger:
     def __init__(self, accounts: Sequence[Account], cards: Sequence[Card]) -> None:
         self._accounts = {account.account_id: account for account in accounts}
         self._cards = {card.card_id: card for card in cards}
+        self._blocked_card_ids: set[str] = set()
         self._balances = {account.account_id: account.opening_balance_cents for account in accounts}
         # Limit key -> (SA calendar day, cents used that day). One entry per key.
         self._usage: dict[str, tuple[date, int]] = {}
@@ -34,6 +35,14 @@ class Ledger:
             return account.credit_limit_cents - self._balances[account_id]
         return self._balances[account_id]
 
+    def add_card(self, card: Card) -> None:
+        """Start accepting a newly issued card."""
+        self._cards[card.card_id] = card
+
+    def block_card(self, card_id: str) -> None:
+        """Decline every later transaction on the card."""
+        self._blocked_card_ids.add(card_id)
+
     def settle(self, draft: TransactionDraft) -> Settlement:
         """Approve or decline a draft, and post it to the balance when approved."""
         if draft.direction is Direction.DEBIT:
@@ -47,6 +56,8 @@ class Ledger:
         return Settlement(TransactionStatus.APPROVED, None, balance)
 
     def _decline_reason(self, draft: TransactionDraft) -> DeclineReason | None:
+        if draft.card_id in self._blocked_card_ids:
+            return DeclineReason.CARD_BLOCKED  # checked first: a blocked card never gets further
         if draft.amount_cents > self.available_cents(draft.account_id):
             return DeclineReason.INSUFFICIENT_FUNDS
 

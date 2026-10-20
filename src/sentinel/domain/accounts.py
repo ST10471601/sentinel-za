@@ -12,6 +12,7 @@ from sentinel.domain.customers import CustomerId
 
 AccountId = Annotated[str, Field(pattern=r"^ACC-\d{7}$")]
 CardId = Annotated[str, Field(pattern=r"^CRD-\d{7}$")]
+CardEventId = Annotated[str, Field(pattern=r"^CEV-\d{7}$")]
 
 AccountNumber = Annotated[str, Field(pattern=r"^\d{10,11}$")]
 CardToken = Annotated[str, Field(pattern=r"^tok_[0-9a-f]{24}$")]
@@ -100,4 +101,30 @@ class Card(DomainModel):
         """A card must expire after the day it was issued."""
         if self.expires_on <= self.issued_at.date():
             raise ValueError("expires_on must be after issued_at")
+        return self
+
+
+class CardEventType(StrEnum):
+    """What happened to a card during the simulation."""
+
+    BLOCKED = "blocked"  # fraud on the card was reported
+    REPORTED_LOST = "reported_lost"  # the customer reported it lost or stolen
+    ISSUED = "issued"  # a replacement card
+
+
+class CardEvent(DomainModel):
+    """One change to a card. A block followed by an issued card is a card replacement."""
+
+    card_event_id: CardEventId
+    card_id: CardId
+    event_type: CardEventType
+    event_time: UtcDatetime
+    replaces_card_id: CardId | None
+
+    @model_validator(mode="after")
+    def check_replaces_card_id(self) -> Self:
+        """Only an issued card replaces another."""
+        is_issued = self.event_type is CardEventType.ISSUED
+        if is_issued != (self.replaces_card_id is not None):
+            raise ValueError("replaces_card_id is required for issued events only")
         return self
