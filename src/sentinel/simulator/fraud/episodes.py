@@ -10,11 +10,11 @@ from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import Card
 from sentinel.domain.customers import Customer
 from sentinel.domain.labels import FraudType
-from sentinel.simulator.drafts import TransactionDraft
+from sentinel.simulator.drafts import EnquiryDraft, TransactionDraft
 from sentinel.simulator.payments import PaymentHabits, PlannedPayment
 
 type ParamValue = str | int | float | bool
-type FraudAction = TransactionDraft | PlannedPayment
+type FraudAction = TransactionDraft | PlannedPayment | EnquiryDraft
 
 
 @dataclass(frozen=True, slots=True)

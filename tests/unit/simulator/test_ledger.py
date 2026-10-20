@@ -13,7 +13,7 @@ from sentinel.domain.transactions import (
     TransactionAuthMethod,
     TransactionStatus,
 )
-from sentinel.simulator.drafts import TransactionDraft
+from sentinel.simulator.drafts import EnquiryDraft, Settlement, TransactionDraft
 from sentinel.simulator.ledger import Ledger
 
 OPENED = datetime(2024, 1, 10, tzinfo=UTC)
@@ -196,3 +196,29 @@ def test_a_new_card_is_accepted_with_its_own_limits(ledger: Ledger) -> None:
 
     settlement = ledger.settle(purchase(card_id=replacement.card_id))
     assert settlement.status is TransactionStatus.APPROVED
+
+
+BALANCE_CHECK = EnquiryDraft(
+    card_id=DEBIT_CARD.card_id,
+    account_id=CHEQUE.account_id,
+    merchant_id="MER-0000001",
+    event_time=MORNING,
+    terminal_lat=-26.2,
+    terminal_lon=28.0,
+)
+
+
+def test_a_balance_check_shows_the_balance_and_posts_nothing(ledger: Ledger) -> None:
+    settlement = ledger.enquire(BALANCE_CHECK)
+
+    assert settlement == Settlement(TransactionStatus.APPROVED, None, 500_000)
+    assert ledger.balance_cents(CHEQUE.account_id) == 500_000
+
+
+def test_a_balance_check_on_a_blocked_card_is_declined(ledger: Ledger) -> None:
+    ledger.block_card(DEBIT_CARD.card_id)
+
+    settlement = ledger.enquire(BALANCE_CHECK)
+
+    assert settlement.status is TransactionStatus.DECLINED
+    assert settlement.decline_reason is DeclineReason.CARD_BLOCKED

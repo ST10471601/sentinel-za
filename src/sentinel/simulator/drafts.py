@@ -1,8 +1,9 @@
-"""Transaction drafts: what a customer tries to do, before the bank settles it."""
+"""Drafts: what a customer tries to do, before the bank settles it."""
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
+from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.transactions import (
     Channel,
     DeclineReason,
@@ -47,6 +48,18 @@ class TransactionDraft:
     terminal_lon: float | None = None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EnquiryDraft:
+    """A balance check at an ATM, before the bank answers it. Checked when it becomes a model."""
+
+    card_id: str
+    account_id: str
+    merchant_id: str
+    event_time: datetime
+    terminal_lat: float | None
+    terminal_lon: float | None
+
+
 @dataclass(frozen=True, slots=True)
 class Settlement:
     """The bank's answer to a draft."""
@@ -63,5 +76,18 @@ def to_transaction(draft: TransactionDraft, number: int, settlement: Settlement)
             "transaction_id": make_id("TXN", number, digits=TRANSACTION_ID_DIGITS),
             **asdict(draft),
             **asdict(settlement),
+        }
+    )
+
+
+def to_balance_enquiry(draft: EnquiryDraft, number: int, settlement: Settlement) -> BalanceEnquiry:
+    """Combine an enquiry draft and the bank's answer into a validated BalanceEnquiry."""
+    return BalanceEnquiry.model_validate(
+        {
+            "balance_enquiry_id": make_id("BEQ", number, digits=TRANSACTION_ID_DIGITS),
+            **asdict(draft),
+            "status": settlement.status,
+            "decline_reason": settlement.decline_reason,
+            "balance_cents": settlement.balance_after_cents,
         }
     )

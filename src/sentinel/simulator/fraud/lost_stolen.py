@@ -18,16 +18,19 @@ from sentinel.domain.customers import Customer
 from sentinel.domain.labels import FraudType
 from sentinel.domain.merchants import Merchant, MerchantCategory
 from sentinel.simulator.card_activity import (
+    BALANCE_CHECK_SECONDS,
     HOME_COUNTRY,
     MerchantIndex,
     atm_withdrawal_draft,
+    balance_enquiry_draft,
     online_purchase_draft,
     store_purchase_draft,
 )
-from sentinel.simulator.drafts import TransactionDraft
+from sentinel.simulator.drafts import EnquiryDraft, TransactionDraft
 from sentinel.simulator.fraud.episodes import (
     Balances,
     CardLoss,
+    FraudAction,
     FraudActions,
     ParamValue,
     Victim,
@@ -41,6 +44,7 @@ ONLINE_ABROAD_SHARE: dict[CardType, float] = {CardType.DEBIT: 0.235, CardType.CR
 
 # Simulation assumptions from here on.
 PIN_KNOWN_SHARE = 0.7  # taken at an ATM with the PIN seen; otherwise lost or pickpocketed
+THIEF_BALANCE_CHECK_SHARE = 0.8  # checks what there is to take before the first withdrawal
 THEFT_HOURS = (time(8), time(18))
 VICTIM_WITHDRAWAL_LEAD_SECONDS = (30, 180)  # the victim's own withdrawal, just before the swap
 FIRST_USE_SECONDS = (300, 2_700)  # 5 to 45 minutes after the theft
@@ -128,7 +132,7 @@ class LostStolenEpisode:
         actions.attempts += [d for d in self.scripted if _sa_day(d.event_time) == day]
         return actions
 
-    def _play(self, spree: Round, available_cents: int) -> list[TransactionDraft]:
+    def _play(self, spree: Round, available_cents: int) -> list[FraudAction]:
         rng = random.Random(f"{self.seed}:{spree.start.isoformat()}")
         if self.is_pin_known:
             return self._take_cash_then_shop(rng, spree, available_cents)
@@ -136,16 +140,19 @@ class LostStolenEpisode:
 
     def _take_cash_then_shop(
         self, rng: random.Random, spree: Round, available_cents: int
-    ) -> list[TransactionDraft]:
+    ) -> list[FraudAction]:
         """Withdraw until the money or the daily ATM limit runs out, then buy with chip and PIN."""
         target = min(available_cents, self.card.daily_atm_limit_cents)
-        drafts: list[TransactionDraft] = []
+        drafts: list[FraudAction] = []
         taken = 0
         moment = spree.start
-        for atm, moment in self._atm_visits(rng, spree.start):
+        for number, (atm, moment) in enumerate(self._atm_visits(rng, spree.start)):
+            is_first = number == 0
             # The withdrawal that goes past the target is the one that declines.
-            if moment >= spree.end or (drafts and taken >= target):
+            if moment >= spree.end or (not is_first and taken >= target):
                 break
+            if is_first and chance(rng, THIEF_BALANCE_CHECK_SHARE):
+                drafts.append(_balance_check(rng, self.card, atm, moment))
             amount = _cash_cents(rng)
             drafts.append(atm_withdrawal_draft(self.card, atm, amount, moment))
             taken += amount
@@ -171,12 +178,10 @@ class LostStolenEpisode:
                 moment += _seconds(rng, ATM_GAP_SECONDS)
             moment += _seconds(rng, DRIVE_SECONDS)
 
-    def _tap(
-        self, rng: random.Random, spree: Round, available_cents: int
-    ) -> list[TransactionDraft]:
+    def _tap(self, rng: random.Random, spree: Round, available_cents: int) -> list[FraudAction]:
         """Contactless taps under the no-PIN limit until one declines."""
         target = min(available_cents, self.card.daily_pos_limit_cents)
-        drafts: list[TransactionDraft] = []
+        drafts: list[FraudAction] = []
         spent = 0
         moment = spree.start
         for _ in range(rng.randint(*TAPS)):
@@ -333,6 +338,13 @@ def _plan_retries(
             amount = rng.randint(*TAP_CENTS)
             drafts.append(store_purchase_draft(card, rng.choice(shops), amount, moment, True))
     return drafts
+
+
+def _balance_check(
+    rng: random.Random, card: Card, atm: Merchant, withdrawn_at: datetime
+) -> EnquiryDraft:
+    """A balance check at the ATM, a moment before the withdrawal."""
+    return balance_enquiry_draft(card, atm, withdrawn_at - _seconds(rng, BALANCE_CHECK_SECONDS))
 
 
 def _cash_cents(rng: random.Random) -> int:

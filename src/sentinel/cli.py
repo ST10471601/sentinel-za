@@ -24,6 +24,7 @@ from sentinel.simulator.reference_files import REFERENCE_DIR_NAME, write_referen
 DEFAULT_MONTHS = 3
 SIMULATION_ERROR_EXIT_CODE = 1
 CONFIG_ERROR_EXIT_CODE = 2
+TABLE_NAME_WIDTH = 22  # fits the longest table name, balance_enquiry_label
 
 app = typer.Typer(help="Sentinel ZA: real-time bank fraud detection.", no_args_is_help=True)
 simulate_app = typer.Typer(help="Generate synthetic bank data.", no_args_is_help=True)
@@ -99,7 +100,7 @@ def simulate_history_command(
     typer.echo(f"history {summary.first_day} to {summary.last_day}")
     paths = writer.paths()
     for table, count in summary.row_counts.items():
-        typer.echo(f"{table.value:<18}{count:>10,} rows  {paths[table]}")
+        typer.echo(f"{table.value:<{TABLE_NAME_WIDTH}}{count:>10,} rows  {paths[table]}")
     typer.echo(f"declined transactions: {summary.declined_count:,}")
     typer.echo(f"fraud transactions: {summary.fraud_count:,}")
 
@@ -115,4 +116,5 @@ def _generate_reference(seed: int, customers: int) -> ReferenceData:
 def _write_reference(reference_data: ReferenceData, data_dir: Path) -> None:
     paths = write_reference_data(reference_data, data_dir / REFERENCE_DIR_NAME)
     for table in reference_data.tables():
-        typer.echo(f"{table.name:<18}{len(table.rows):>10,} rows  {paths[table.name]}")
+        name, count = table.name, len(table.rows)
+        typer.echo(f"{name:<{TABLE_NAME_WIDTH}}{count:>10,} rows  {paths[table.name]}")

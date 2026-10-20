@@ -1,10 +1,10 @@
-"""Everyday card use: purchases in store and online, and ATM withdrawals."""
+"""Everyday card use: purchases in store and online, ATM withdrawals and balance checks."""
 
 import random
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Self
 
 from sentinel.domain.accounts import Card, CardType
@@ -12,7 +12,7 @@ from sentinel.domain.customers import Customer
 from sentinel.domain.merchants import Merchant, MerchantCategory
 from sentinel.domain.transactions import Channel, Direction, EntryMode, TransactionAuthMethod
 from sentinel.simulator.budget import DayBudget
-from sentinel.simulator.drafts import TransactionDraft
+from sentinel.simulator.drafts import EnquiryDraft, TransactionDraft
 from sentinel.simulator.randomness import chance, pick
 from sentinel.simulator.spending import (
     SPENDING_BY_BAND,
@@ -39,6 +39,9 @@ LEGIT_FOREIGN_CATEGORIES = frozenset(
         MerchantCategory.TRAVEL_AGENCY,
     }
 )
+
+# Simulation assumption: seconds between checking the balance and withdrawing at the same ATM.
+BALANCE_CHECK_SECONDS = (20, 90)
 
 # Simulation assumptions: tap-to-pay needs no PIN up to R500, and fixed exchange rates.
 CONTACTLESS_NO_PIN_LIMIT_CENTS = 50_000
@@ -130,10 +133,10 @@ def card_drafts(
     day: date,
     weight: float,
     budget: DayBudget,
-) -> list[TransactionDraft]:
-    """Return the customer's card purchases and ATM withdrawals for one day."""
+) -> list[TransactionDraft | EnquiryDraft]:
+    """Return the customer's card purchases, ATM withdrawals and balance checks for one day."""
     profile = SPENDING_BY_BAND[customer.income_band]
-    drafts: list[TransactionDraft] = []
+    drafts: list[TransactionDraft | EnquiryDraft] = []
 
     for _ in range(sample_daily_count(rng, profile.card_purchases_per_month, weight)):
         category = pick(rng, profile.category_weights)
@@ -150,6 +153,9 @@ def card_drafts(
         amount = atm_amount(rng, customer.income_band)
         if budget.try_spend(habits.debit_card.account_id, amount):
             event_time = pick_event_time(rng, day)
+            if chance(rng, profile.balance_check_share):
+                checked_at = event_time - timedelta(seconds=rng.randint(*BALANCE_CHECK_SECONDS))
+                drafts.append(balance_enquiry_draft(habits.debit_card, atm, checked_at))
             drafts.append(atm_withdrawal_draft(habits.debit_card, atm, amount, event_time))
 
     return drafts
@@ -229,6 +235,18 @@ def atm_withdrawal_draft(
         card_id=card.card_id,
         merchant_id=atm.merchant_id,
         entry_mode=EntryMode.CHIP,
+        terminal_lat=atm.lat,
+        terminal_lon=atm.lon,
+    )
+
+
+def balance_enquiry_draft(card: Card, atm: Merchant, event_time: datetime) -> EnquiryDraft:
+    """A balance check at an ATM, before deciding how much to withdraw."""
+    return EnquiryDraft(
+        card_id=card.card_id,
+        account_id=card.account_id,
+        merchant_id=atm.merchant_id,
+        event_time=event_time,
         terminal_lat=atm.lat,
         terminal_lon=atm.lon,
     )

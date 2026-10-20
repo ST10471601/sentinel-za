@@ -5,6 +5,7 @@ The scoring service must never see them.
 """
 
 import json
+from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Self
 
@@ -12,6 +13,7 @@ from pydantic import Field, model_validator
 
 from sentinel.core.datetimes import UtcDatetime
 from sentinel.domain.accounts import AccountId
+from sentinel.domain.balance_enquiries import BalanceEnquiryId
 from sentinel.domain.base import Cents, DomainModel
 from sentinel.domain.customers import CustomerId
 from sentinel.domain.transactions import TransactionId
@@ -89,12 +91,23 @@ class TransactionLabel(DomainModel):
     @model_validator(mode="after")
     def check_fraud_fields(self) -> Self:
         """Fraud needs a type and scenario; normal transactions have no fraud fields."""
-        has_fraud_fields = self.fraud_type is not None and self.scenario_id is not None
-        has_any = self.fraud_type is not None or self.scenario_id is not None
-        if self.is_fraud and not has_fraud_fields:
-            raise ValueError("fraud labels need fraud_type and scenario_id")
-        if not self.is_fraud and (has_any or self.reported_at is not None):
-            raise ValueError("normal transactions have no fraud_type, scenario_id or reported_at")
+        _check_fraud_fields(self.is_fraud, self.fraud_type, self.scenario_id, self.reported_at)
+        return self
+
+
+class BalanceEnquiryLabel(DomainModel):
+    """Whether a balance enquiry was made by a fraudster. Every enquiry gets a label."""
+
+    balance_enquiry_id: BalanceEnquiryId
+    is_fraud: bool
+    fraud_type: FraudType | None
+    scenario_id: ScenarioId | None
+    reported_at: UtcDatetime | None
+
+    @model_validator(mode="after")
+    def check_fraud_fields(self) -> Self:
+        """Fraud needs a type and scenario; normal enquiries have no fraud fields."""
+        _check_fraud_fields(self.is_fraud, self.fraud_type, self.scenario_id, self.reported_at)
         return self
 
 
@@ -111,3 +124,18 @@ class AccountLabel(DomainModel):
         if self.is_mule != (self.mule_since is not None):
             raise ValueError("mule_since must be set for mules and empty otherwise")
         return self
+
+
+def _check_fraud_fields(
+    is_fraud: bool,
+    fraud_type: FraudType | None,
+    scenario_id: str | None,
+    reported_at: datetime | None,
+) -> None:
+    """Shared by every label: fraud fields are filled for fraud and empty otherwise."""
+    has_fraud_fields = fraud_type is not None and scenario_id is not None
+    has_any = fraud_type is not None or scenario_id is not None
+    if is_fraud and not has_fraud_fields:
+        raise ValueError("fraud labels need fraud_type and scenario_id")
+    if not is_fraud and (has_any or reported_at is not None):
+        raise ValueError("normal labels have no fraud_type, scenario_id or reported_at")
