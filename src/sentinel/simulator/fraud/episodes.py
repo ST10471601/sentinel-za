@@ -62,6 +62,9 @@ class Episode(Protocol):
     def days(self) -> frozenset[date]:
         """SA calendar days on which the fraudster acts."""
 
+    def planned_end(self) -> datetime:
+        """When the fraudster plans to stop. Report delays count from here."""
+
     def act(self, day: date, balances: Balances) -> FraudActions:
         """What the fraudster does on ``day``."""
 
@@ -92,9 +95,17 @@ class ScriptedEpisode:
     params: Mapping[str, ParamValue]
     drafts: tuple[TransactionDraft, ...]
 
+    def __post_init__(self) -> None:
+        if not self.drafts:
+            raise ValueError("a scripted episode needs at least one draft")
+
     def days(self) -> frozenset[date]:
         """SA calendar days on which the fraudster acts."""
         return frozenset(_sa_day(draft.event_time) for draft in self.drafts)
+
+    def planned_end(self) -> datetime:
+        """The time of the last scripted transaction."""
+        return max(draft.event_time for draft in self.drafts)
 
     def act(self, day: date, balances: Balances) -> FraudActions:
         """The drafts that fall on ``day``. Balances don't matter: the script is fixed."""

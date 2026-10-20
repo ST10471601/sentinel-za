@@ -1,5 +1,4 @@
 import json
-import random
 from datetime import UTC, datetime, timedelta
 
 from sentinel.domain.labels import FraudType
@@ -14,15 +13,16 @@ from sentinel.domain.transactions import (
 )
 from sentinel.simulator.drafts import Settlement, TransactionDraft, to_transaction
 from sentinel.simulator.fraud.episodes import ScriptedEpisode
-from sentinel.simulator.fraud.ground_truth import REPORT_DELAY_DAYS, GroundTruth, normal_labels
+from sentinel.simulator.fraud.ground_truth import GroundTruth, normal_labels
 
 START = datetime(2026, 2, 3, 20, 0, tzinfo=UTC)
+REPORTED_AT = START + timedelta(days=5)
 APPROVED = Settlement(TransactionStatus.APPROVED, None, 100_000)
 DECLINED = Settlement(TransactionStatus.DECLINED, DeclineReason.LIMIT_EXCEEDED, 100_000)
 
 
-def transaction(number: int, minutes: int, settlement: Settlement = APPROVED) -> Transaction:
-    draft = TransactionDraft(
+def draft(number: int, minutes: int) -> TransactionDraft:
+    return TransactionDraft(
         account_id="ACC-0000001",
         direction=Direction.DEBIT,
         amount_cents=10_000 * number,
@@ -34,7 +34,10 @@ def transaction(number: int, minutes: int, settlement: Settlement = APPROVED) ->
         merchant_id="MER-0000001",
         entry_mode=EntryMode.ECOMMERCE,
     )
-    return to_transaction(draft, number, settlement)
+
+
+def transaction(number: int, minutes: int, settlement: Settlement = APPROVED) -> Transaction:
+    return to_transaction(draft(number, minutes), number, settlement)
 
 
 def episode(scenario_id: str) -> ScriptedEpisode:
@@ -43,13 +46,13 @@ def episode(scenario_id: str) -> ScriptedEpisode:
         fraud_type=FraudType.CARD_NOT_PRESENT,
         victim_customer_id="CUS-0000001",
         params={"foreign": True, "charges": 2},
-        drafts=(),
+        drafts=(draft(1, 0),),
     )
 
 
 def test_episode_is_summarised_and_every_transaction_labelled() -> None:
-    truth = GroundTruth(random.Random(1), unreported_share=0.0)
-    truth.add_episode(episode("SCN-0000001"))
+    truth = GroundTruth()
+    truth.add_episode(episode("SCN-0000001"), REPORTED_AT)
     truth.record("SCN-0000001", [transaction(1, 0), transaction(2, 30, DECLINED)])
     truth.record("SCN-0000001", [transaction(3, 45)])
 
@@ -66,19 +69,15 @@ def test_episode_is_summarised_and_every_transaction_labelled() -> None:
         "TXN-000000002",
         "TXN-000000003",
     ]
-    low, high = REPORT_DELAY_DAYS[FraudType.CARD_NOT_PRESENT]
     for label in labels:
         assert label.is_fraud
         assert label.scenario_id == "SCN-0000001"
-        assert label.reported_at == labels[0].reported_at  # one claim covers the episode
-        assert label.reported_at is not None
-        delay = label.reported_at - instance.ended_at
-        assert timedelta(days=low) <= delay <= timedelta(days=high)
+        assert label.reported_at == REPORTED_AT  # one claim covers the episode
 
 
 def test_unreported_fraud_has_no_reported_at() -> None:
-    truth = GroundTruth(random.Random(1), unreported_share=1.0)
-    truth.add_episode(episode("SCN-0000001"))
+    truth = GroundTruth()
+    truth.add_episode(episode("SCN-0000001"), reported_at=None)
     truth.record("SCN-0000001", [transaction(1, 0)])
 
     _, labels = truth.finish()
@@ -87,9 +86,9 @@ def test_unreported_fraud_has_no_reported_at() -> None:
 
 
 def test_episodes_that_never_happened_are_left_out() -> None:
-    truth = GroundTruth(random.Random(1), unreported_share=0.0)
-    truth.add_episode(episode("SCN-0000001"))
-    truth.add_episode(episode("SCN-0000002"))
+    truth = GroundTruth()
+    truth.add_episode(episode("SCN-0000001"), REPORTED_AT)
+    truth.add_episode(episode("SCN-0000002"), REPORTED_AT)
     truth.record("SCN-0000002", [transaction(1, 0)])
 
     instances, _ = truth.finish()

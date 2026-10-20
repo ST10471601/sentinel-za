@@ -1,5 +1,7 @@
 from datetime import UTC, date, datetime
 
+import pytest
+
 from sentinel.domain.labels import FraudType
 from sentinel.domain.transactions import Channel, Direction, TransactionAuthMethod
 from sentinel.simulator.drafts import TransactionDraft
@@ -41,3 +43,18 @@ def test_scripted_episode_acts_on_sa_calendar_days() -> None:
     assert episode.act(date(2026, 1, 14), NoBalances()).attempts == [before_midnight]
     assert episode.act(date(2026, 1, 15), NoBalances()).attempts == [after_midnight]
     assert episode.act(date(2026, 1, 16), NoBalances()).attempts == []
+
+
+def test_scripted_episode_ends_at_its_last_draft() -> None:
+    first = draft_at(datetime(2026, 1, 14, 9, 0, tzinfo=UTC))
+    last = draft_at(datetime(2026, 1, 14, 9, 40, tzinfo=UTC))
+    episode = ScriptedEpisode(
+        "SCN-0000001", FraudType.CARD_NOT_PRESENT, "CUS-0000001", {}, (last, first)
+    )
+
+    assert episode.planned_end() == last.event_time
+
+
+def test_scripted_episode_needs_a_draft() -> None:
+    with pytest.raises(ValueError, match="at least one draft"):
+        ScriptedEpisode("SCN-0000001", FraudType.CARD_NOT_PRESENT, "CUS-0000001", {}, drafts=())

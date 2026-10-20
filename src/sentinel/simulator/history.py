@@ -31,6 +31,7 @@ from sentinel.simulator.fraud.card_not_present import CardNotPresent
 from sentinel.simulator.fraud.episodes import Episode, FraudAction, Scenario, Victim
 from sentinel.simulator.fraud.ground_truth import GroundTruth, normal_labels
 from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
+from sentinel.simulator.fraud.reports import plan_reported_at
 from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.ledger import Ledger
 from sentinel.simulator.payments import (
@@ -263,12 +264,12 @@ class _Simulation:
             IdSequence("SCN"),
         )
 
-        ground_truth = GroundTruth(
-            make_rng(reference.seed, "fraud-reports"), fraud.unreported_share
-        )
+        report_rng = make_rng(reference.seed, "fraud-reports")
+        ground_truth = GroundTruth()
         episodes_by_day: dict[date, list[Episode]] = defaultdict(list)
         for episode in episodes:
-            ground_truth.add_episode(episode)
+            reported_at = plan_reported_at(report_rng, episode, fraud.unreported_share)
+            ground_truth.add_episode(episode, reported_at)
             for day in episode.days():
                 episodes_by_day[day].append(episode)
         return ground_truth, episodes_by_day
