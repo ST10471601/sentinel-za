@@ -28,9 +28,19 @@ class Victim:
 
 @dataclass(slots=True)
 class FraudActions:
-    """What a fraudster does on one day."""
+    """What a fraudster does on one day, plus any of the victim's own transactions it needs."""
 
     attempts: list[FraudAction] = field(default_factory=list)
+    genuine: list[TransactionDraft] = field(default_factory=list)  # labelled not fraud
+
+
+@dataclass(frozen=True, slots=True)
+class CardLoss:
+    """A physical card taken from the victim, and when the victim calls the bank about it."""
+
+    card_id: str
+    lost_at: datetime  # the owner can't use the card from here
+    reported_lost_at: datetime  # the call blocks the card, even if no fraud is ever claimed
 
 
 class Balances(Protocol):
@@ -62,6 +72,10 @@ class Episode(Protocol):
     @property
     def card_id(self) -> str | None:
         """The card the fraud uses, blocked when the fraud is reported. None if no card."""
+
+    @property
+    def card_loss(self) -> CardLoss | None:
+        """The lost or stolen card, if the victim no longer has it."""
 
     def days(self) -> frozenset[date]:
         """SA calendar days on which the fraudster acts."""
@@ -103,6 +117,11 @@ class ScriptedEpisode:
     def __post_init__(self) -> None:
         if not self.drafts:
             raise ValueError("a scripted episode needs at least one draft")
+
+    @property
+    def card_loss(self) -> None:
+        """Scripted fraud copies card details; the victim keeps the card."""
+        return None
 
     def days(self) -> frozenset[date]:
         """SA calendar days on which the fraudster acts."""

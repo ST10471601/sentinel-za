@@ -31,6 +31,7 @@ from sentinel.simulator.drafts import TransactionDraft, to_transaction
 from sentinel.simulator.fraud.card_not_present import CardNotPresent
 from sentinel.simulator.fraud.episodes import Episode, FraudAction, Scenario, Victim
 from sentinel.simulator.fraud.ground_truth import GroundTruth, normal_labels
+from sentinel.simulator.fraud.lost_stolen import LostStolen
 from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
 from sentinel.simulator.fraud.reports import plan_card_block, plan_reported_at
 from sentinel.simulator.identifiers import IdSequence
@@ -156,6 +157,7 @@ class _FraudPlan:
     ground_truth: GroundTruth
     episodes_by_day: dict[date, list[Episode]] = field(default_factory=lambda: defaultdict(list))
     blocks_by_day: dict[date, list[CardBlock]] = field(default_factory=lambda: defaultdict(list))
+    unusable_from: dict[str, datetime] = field(default_factory=dict)  # card ID -> lost or blocked
 
 
 @dataclass(slots=True)
@@ -249,12 +251,6 @@ class _Simulation:
             IdSequence("CEV"),
         )
         self._fraud = self._plan_fraud(reference, months, fraud)
-        # When the owner stops using a blocked card, and starts using its replacement.
-        self._blocked_from = {
-            block.card_id: block.blocked_at
-            for blocks in self._fraud.blocks_by_day.values()
-            for block in blocks
-        }
         self._issued_at: dict[str, datetime] = {}
 
     def run(self) -> HistorySummary:
@@ -281,7 +277,10 @@ class _Simulation:
         self, reference: ReferenceData, months: int, fraud: FraudSettings
     ) -> _FraudPlan:
         """Pick fraud episodes, victims and report times up front, as unusual events are."""
-        scenarios: list[Scenario] = [CardNotPresent(reference.merchants)]
+        scenarios: list[Scenario] = [
+            CardNotPresent(reference.merchants),
+            LostStolen(reference.merchants),
+        ]
         victims = [Victim(plan.customer, plan.cards, plan.payments) for plan in self._plans]
         episodes = plan_episodes(
             make_rng(reference.seed, "fraud"),
@@ -303,6 +302,8 @@ class _Simulation:
             block = plan_card_block(episode, reported_at)
             if block is not None:
                 plan.blocks_by_day[to_sast(block.blocked_at).date()].append(block)
+                loss = episode.card_loss
+                plan.unusable_from[block.card_id] = loss.lost_at if loss else block.blocked_at
         return plan
 
     def _plan_customer(
@@ -341,6 +342,7 @@ class _Simulation:
         output.planned += self._fraud.blocks_by_day.get(day, [])
         for episode in self._fraud.episodes_by_day.get(day, []):
             actions = episode.act(day, self._ledger)
+            output.planned += actions.genuine
             output.planned += [_FraudAttempt(episode.scenario_id, a) for a in actions.attempts]
 
         self._emit(HistoryTable.LOGIN_SESSION, output.sessions)
@@ -366,11 +368,11 @@ class _Simulation:
         self._emit(HistoryTable.CARD_EVENT, [r.event for r in replacements])
 
     def _owner_can_use(self, item: _Planned) -> bool:
-        """Customers don't use a card once it is blocked, or before its replacement arrives."""
+        """Customers can't use a lost or blocked card, nor its replacement before it arrives."""
         if not isinstance(item, TransactionDraft) or item.card_id is None:
             return True
-        blocked_from = self._blocked_from.get(item.card_id)
-        if blocked_from is not None and item.event_time >= blocked_from:
+        unusable_from = self._fraud.unusable_from.get(item.card_id)
+        if unusable_from is not None and item.event_time >= unusable_from:
             return False
         issued_at = self._issued_at.get(item.card_id)
         return issued_at is None or item.event_time >= issued_at

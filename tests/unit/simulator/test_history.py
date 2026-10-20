@@ -1,6 +1,7 @@
+import json
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -26,6 +27,8 @@ from sentinel.simulator.reference_data import ReferenceData, generate_reference_
 SEED = 21
 CUSTOMERS = 150
 MONTHS = 1
+INJECTED_FRAUD_TYPES = {FraudType.CARD_NOT_PRESENT, FraudType.CARD_PRESENT_LOST_STOLEN}
+BLOCK_EVENTS = {CardEventType.BLOCKED, CardEventType.REPORTED_LOST}
 
 
 class CollectedRows:
@@ -221,7 +224,8 @@ def test_fraud_labels_match_their_episodes(
         assert label.scenario_id is not None
         scenario = scenarios[label.scenario_id]
         transaction = by_id[label.transaction_id]
-        assert label.fraud_type is scenario.fraud_type is FraudType.CARD_NOT_PRESENT
+        assert label.fraud_type is scenario.fraud_type
+        assert scenario.fraud_type in INJECTED_FRAUD_TYPES
         assert scenario.started_at <= transaction.event_time <= scenario.ended_at
         if transaction.status is TransactionStatus.APPROVED:
             stolen[label.scenario_id] += transaction.amount_cents
@@ -267,7 +271,7 @@ def test_each_blocked_card_is_replaced_on_the_same_account(
     reference: ReferenceData, fraud_heavy_run: CollectedRows
 ) -> None:
     events = fraud_heavy_run.card_events()
-    blocked_at = {e.card_id: e.event_time for e in events if e.event_type is CardEventType.BLOCKED}
+    blocked_at = {e.card_id: e.event_time for e in events if e.event_type in BLOCK_EVENTS}
     issued = [e for e in events if e.event_type is CardEventType.ISSUED]
     all_cards = {c.card_id: c for c in [*reference.cards, *fraud_heavy_run.cards()]}
 
@@ -285,7 +289,7 @@ def test_owners_stop_using_a_blocked_card_and_move_to_the_new_one(
     fraud_heavy_run: CollectedRows,
 ) -> None:
     events = fraud_heavy_run.card_events()
-    blocked_at = {e.card_id: e.event_time for e in events if e.event_type is CardEventType.BLOCKED}
+    blocked_at = {e.card_id: e.event_time for e in events if e.event_type in BLOCK_EVENTS}
     issued_at = {c.card_id: c.issued_at for c in fraud_heavy_run.cards()}
     fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
     used_replacements = set()
@@ -303,10 +307,98 @@ def test_owners_stop_using_a_blocked_card_and_move_to_the_new_one(
     assert used_replacements
 
 
-def test_unreported_fraud_leaves_cards_alone(reference: ReferenceData) -> None:
+def test_unreported_fraud_blocks_only_cards_reported_lost(reference: ReferenceData) -> None:
     sink = CollectedRows()
     simulate_history(reference, MONTHS, sink, FraudSettings(300.0, unreported_share=1.0))
+    blocks = [e for e in sink.card_events() if e.event_type is not CardEventType.ISSUED]
 
     assert sink.scenarios()
-    assert not sink.card_events()
-    assert not sink.cards()
+    assert blocks
+    assert {e.event_type for e in blocks} == {CardEventType.REPORTED_LOST}
+
+
+def lost_stolen_cards(rows: CollectedRows) -> dict[str, tuple[ScenarioInstance, str]]:
+    """Each lost or stolen card episode, with the card the thief used."""
+    episodes = {
+        s.scenario_id: s
+        for s in rows.scenarios()
+        if s.fraud_type is FraudType.CARD_PRESENT_LOST_STOLEN
+    }
+    transactions = {t.transaction_id: t for t in rows.transactions()}
+    cards: dict[str, tuple[ScenarioInstance, str]] = {}
+    for label in rows.labels():
+        if label.scenario_id in episodes:
+            card_id = transactions[label.transaction_id].card_id
+            assert card_id is not None
+            cards[label.scenario_id] = (episodes[label.scenario_id], card_id)
+    return cards
+
+
+def call_time(scenario: ScenarioInstance) -> datetime:
+    """Roughly when the victim called the bank; params keep the delay in whole minutes."""
+    params = json.loads(scenario.params)
+    return datetime.fromisoformat(params["lost_at"]) + timedelta(
+        minutes=params["call_delay_minutes"]
+    )
+
+
+def test_lost_cards_are_blocked_at_the_call_and_the_thief_is_declined(
+    fraud_heavy_run: CollectedRows,
+) -> None:
+    stolen = lost_stolen_cards(fraud_heavy_run)
+    reported_lost = {
+        e.card_id
+        for e in fraud_heavy_run.card_events()
+        if e.event_type is CardEventType.REPORTED_LOST
+    }
+    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    thief_declines = [
+        t
+        for t in fraud_heavy_run.transactions()
+        if t.transaction_id in fraud_ids and t.decline_reason is DeclineReason.CARD_BLOCKED
+    ]
+
+    run_end = max(t.event_time for t in fraud_heavy_run.transactions())
+    called_in_run = {
+        card_id for scenario, card_id in stolen.values() if call_time(scenario) < run_end
+    }
+
+    assert called_in_run
+    assert called_in_run <= reported_lost
+    assert {t.card_id for t in thief_declines} <= reported_lost
+    assert thief_declines
+
+
+def test_owners_stop_using_a_card_when_it_is_stolen(fraud_heavy_run: CollectedRows) -> None:
+    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    lost_at = {
+        card_id: datetime.fromisoformat(json.loads(scenario.params)["lost_at"])
+        for scenario, card_id in lost_stolen_cards(fraud_heavy_run).values()
+    }
+
+    for t in fraud_heavy_run.transactions():
+        if t.transaction_id not in fraud_ids and t.card_id in lost_at:
+            assert t.event_time < lost_at[t.card_id]
+
+
+def test_the_victim_withdraws_cash_where_the_card_is_swapped(
+    fraud_heavy_run: CollectedRows,
+) -> None:
+    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    genuine = [t for t in fraud_heavy_run.transactions() if t.transaction_id not in fraud_ids]
+    swaps = 0
+
+    for scenario, card_id in lost_stolen_cards(fraud_heavy_run).values():
+        params = json.loads(scenario.params)
+        if not params["pin_known"]:
+            continue
+        lost_at = datetime.fromisoformat(params["lost_at"])
+        assert any(
+            t.card_id == card_id
+            and t.merchant_id == params["theft_atm_id"]
+            and t.channel is Channel.ATM
+            and timedelta(0) < lost_at - t.event_time <= timedelta(minutes=3)
+            for t in genuine
+        )
+        swaps += 1
+    assert swaps
