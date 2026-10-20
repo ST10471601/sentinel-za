@@ -6,6 +6,8 @@ import pytest
 
 from sentinel.core.datetimes import to_sast
 from sentinel.domain.labels import FraudType
+from sentinel.domain.transactions import Channel, Direction, TransactionAuthMethod
+from sentinel.simulator.drafts import TransactionDraft
 from sentinel.simulator.fraud.episodes import ScriptedEpisode, Victim
 from sentinel.simulator.fraud.planning import (
     FRAUD_MIX,
@@ -33,8 +35,17 @@ class FakeScenario:
         self, rng: random.Random, victim: Victim, start: datetime, scenario_id: str
     ) -> ScriptedEpisode:
         self.starts.append(start)
+        attempt = TransactionDraft(
+            account_id="ACC-0000001",
+            direction=Direction.DEBIT,
+            amount_cents=5_000,
+            event_time=start,
+            channel=Channel.EFT,
+            auth_method=TransactionAuthMethod.OTP,
+            country_code="ZA",
+        )
         return ScriptedEpisode(
-            scenario_id, self.fraud_type, victim.customer.customer_id, {}, drafts=()
+            scenario_id, self.fraud_type, victim.customer.customer_id, {}, drafts=(attempt,)
         )
 
 
