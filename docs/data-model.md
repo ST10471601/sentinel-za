@@ -36,6 +36,8 @@ erDiagram
     MERCHANT |o--o{ TRANSACTION : "paid at"
     BENEFICIARY |o--o{ TRANSACTION : "paid to"
     LOGIN_SESSION |o--o{ TRANSACTION : "made in"
+    CARD ||--o{ BALANCE_ENQUIRY : "checked with"
+    MERCHANT ||--o{ BALANCE_ENQUIRY : "made at"
 
     CUSTOMER {
         string customer_id PK
@@ -103,6 +105,12 @@ erDiagram
         timestamp event_time
         string channel
     }
+    BALANCE_ENQUIRY {
+        string balance_enquiry_id PK
+        string card_id FK
+        string merchant_id FK
+        timestamp event_time
+    }
 ```
 
 ## Entity-relationship diagram (scoring, cases and ground truth)
@@ -115,6 +123,8 @@ erDiagram
     ALERT ||--o{ ANALYST_DECISION : "reviewed in"
     SCENARIO_INSTANCE ||--o{ TRANSACTION_LABEL : produces
     TRANSACTION ||--|| TRANSACTION_LABEL : "truth for"
+    SCENARIO_INSTANCE ||--o{ BALANCE_ENQUIRY_LABEL : produces
+    BALANCE_ENQUIRY ||--|| BALANCE_ENQUIRY_LABEL : "truth for"
     ACCOUNT ||--o| ACCOUNT_LABEL : "truth for"
 
     TRANSACTION_SCORE {
@@ -149,6 +159,11 @@ erDiagram
         string scenario_id FK
         timestamp reported_at
     }
+    BALANCE_ENQUIRY_LABEL {
+        string balance_enquiry_id PK
+        bool is_fraud
+        string scenario_id FK
+    }
     ACCOUNT_LABEL {
         string account_id PK
         bool is_mule
@@ -171,17 +186,18 @@ erDiagram
 Each file's metadata records the seed and simulation start that produced it.
 
 **Simulated history (batch, until the streaming simulator replays it):** `uv run sentinel simulate history`
-writes the reference data, then `transaction`, `login_session`, `beneficiary`, `beneficiary_event`,
-`card_event`, and the `device`, `customer_device` and `card` rows added during the period to `data/history/`.
+writes the reference data, then `transaction`, `balance_enquiry`, `login_session`, `beneficiary`,
+`beneficiary_event`, `card_event`, and the `device`, `customer_device` and `card` rows added during the period to `data/history/`.
 Fraud is injected into the same day-by-day run, so stolen money really leaves balances.
-The ground truth (`scenario_instance`, `transaction_label`) goes to `data/truth/`, apart from
-what the bank can observe. Rows are written in batches, so memory stays flat however long the run.
+The ground truth (`scenario_instance`, `transaction_label`, `balance_enquiry_label`) goes to
+`data/truth/`, apart from what the bank can observe. Rows are written in batches, so memory stays flat however long the run.
 
 **Event streams (through the broker):**
 
 | Topic | Entity |
 |---|---|
 | `transactions.raw` | `transaction` |
+| `balance_enquiries.raw` | `balance_enquiry` |
 | `logins.raw` | `login_session` |
 | `sim_swaps.raw` | `sim_swap_event` |
 | `beneficiaries.raw` | `beneficiary_event` |
@@ -386,6 +402,23 @@ The core event. One row per entry posted to an account. Internal transfers produ
 | balance_after_cents | bigint | | Account balance after posting |
 | schema_version | int | | Event schema version, starts at `1` |
 
+### balance_enquiry
+
+A balance check at an ATM, as the card switch logs it. No money moves, so it is never posted and is
+not a `transaction`. Customers sometimes check before withdrawing; thieves usually do.
+
+| Column | Type | PII | Description |
+|---|---|---|---|
+| balance_enquiry_id | string | | PK. `BEQ-000000001` |
+| card_id | string | | FK → card |
+| account_id | string | | FK → account the card draws on |
+| merchant_id | string | | FK → merchant (the ATM) |
+| event_time | timestamp | | |
+| terminal_lat, terminal_lon | double | | ATM location |
+| status | string | | `approved` or `declined` |
+| decline_reason | string | | `card_blocked` (nullable) |
+| balance_cents | bigint | | Account balance at the time, shown on screen when approved |
+
 ### Bronze ingestion metadata
 
 Added to every bronze row by the ingestion consumer.
@@ -470,6 +503,16 @@ Added to every bronze row by the ingestion consumer.
 | fraud_type | string | Nullable |
 | scenario_id | string | FK → scenario_instance (nullable) |
 | reported_at | timestamp | When the bank would learn it was fraud (claim or chargeback). Models may only use labels available at training time |
+
+**balance_enquiry_label** (one per balance enquiry, fraud or not)
+
+| Column | Type | Description |
+|---|---|---|
+| balance_enquiry_id | string | PK, FK → balance_enquiry |
+| is_fraud | bool | |
+| fraud_type | string | Nullable |
+| scenario_id | string | FK → scenario_instance (nullable) |
+| reported_at | timestamp | Same as the episode's transaction labels |
 
 **account_label** (one per account)
 

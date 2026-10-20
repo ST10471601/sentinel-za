@@ -39,6 +39,7 @@ class SpendingProfile:
     contactless_share: float  # of in-person card purchases; the rest use chip and PIN
     atm_withdrawals_per_month: float
     atm_amount: TypicalAmount
+    balance_check_share: float  # of ATM withdrawals; assumption: tighter budgets check more
     payments_per_month: float  # EFT and PayShap to saved beneficiaries
     payment_amount: TypicalAmount
     payshap_share: float  # of those payments
@@ -66,6 +67,7 @@ SPENDING_BY_BAND: dict[IncomeBand, SpendingProfile] = {
         contactless_share=0.6,
         atm_withdrawals_per_month=4,
         atm_amount=TypicalAmount(40_000, 0.6),
+        balance_check_share=0.30,
         payments_per_month=3,
         payment_amount=TypicalAmount(50_000, 0.8),
         payshap_share=0.4,
@@ -91,6 +93,7 @@ SPENDING_BY_BAND: dict[IncomeBand, SpendingProfile] = {
         contactless_share=0.75,
         atm_withdrawals_per_month=2,
         atm_amount=TypicalAmount(80_000, 0.6),
+        balance_check_share=0.20,
         payments_per_month=5,
         payment_amount=TypicalAmount(150_000, 0.9),
         payshap_share=0.3,
@@ -117,6 +120,7 @@ SPENDING_BY_BAND: dict[IncomeBand, SpendingProfile] = {
         contactless_share=0.85,
         atm_withdrawals_per_month=1,
         atm_amount=TypicalAmount(150_000, 0.6),
+        balance_check_share=0.10,
         payments_per_month=8,
         payment_amount=TypicalAmount(400_000, 1.0),
         payshap_share=0.25,
@@ -140,6 +144,7 @@ SPENDING_BY_BAND: dict[IncomeBand, SpendingProfile] = {
         contactless_share=0.5,
         atm_withdrawals_per_month=2,
         atm_amount=TypicalAmount(300_000, 0.6),
+        balance_check_share=0.05,
         payments_per_month=30,  # suppliers and wages
         payment_amount=TypicalAmount(1_200_000, 1.0),
         payshap_share=0.15,

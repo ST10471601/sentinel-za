@@ -11,11 +11,12 @@ from typing import Protocol
 
 from sentinel.core.datetimes import add_months, to_sast
 from sentinel.domain.accounts import Account, Card, CardEvent, CardType
+from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.customers import Customer
 from sentinel.domain.devices import CustomerDevice, Device
-from sentinel.domain.labels import ScenarioInstance, TransactionLabel
+from sentinel.domain.labels import BalanceEnquiryLabel, ScenarioInstance, TransactionLabel
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
 from sentinel.simulator.beneficiaries import generate_beneficiaries
@@ -27,10 +28,19 @@ from sentinel.simulator.card_activity import (
     plan_card_habits,
 )
 from sentinel.simulator.card_replacement import CardBlock, CardReplacements, Replacement
-from sentinel.simulator.drafts import TransactionDraft, to_transaction
+from sentinel.simulator.drafts import (
+    EnquiryDraft,
+    TransactionDraft,
+    to_balance_enquiry,
+    to_transaction,
+)
 from sentinel.simulator.fraud.card_not_present import CardNotPresent
 from sentinel.simulator.fraud.episodes import Episode, FraudAction, Scenario, Victim
-from sentinel.simulator.fraud.ground_truth import GroundTruth, normal_labels
+from sentinel.simulator.fraud.ground_truth import (
+    GroundTruth,
+    normal_enquiry_label,
+    normal_labels,
+)
 from sentinel.simulator.fraud.lost_stolen import LostStolen
 from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
 from sentinel.simulator.fraud.reports import plan_card_block, plan_reported_at
@@ -79,6 +89,7 @@ class HistoryTable(StrEnum):
     """Tables the history simulation produces."""
 
     TRANSACTION = "transaction"
+    BALANCE_ENQUIRY = "balance_enquiry"
     LOGIN_SESSION = "login_session"
     BENEFICIARY = "beneficiary"
     BENEFICIARY_EVENT = "beneficiary_event"
@@ -88,10 +99,12 @@ class HistoryTable(StrEnum):
     CARD_EVENT = "card_event"
     SCENARIO_INSTANCE = "scenario_instance"
     TRANSACTION_LABEL = "transaction_label"
+    BALANCE_ENQUIRY_LABEL = "balance_enquiry_label"
 
 
 MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
     HistoryTable.TRANSACTION: Transaction,
+    HistoryTable.BALANCE_ENQUIRY: BalanceEnquiry,
     HistoryTable.LOGIN_SESSION: LoginSession,
     HistoryTable.BENEFICIARY: Beneficiary,
     HistoryTable.BENEFICIARY_EVENT: BeneficiaryEvent,
@@ -101,10 +114,17 @@ MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
     HistoryTable.CARD_EVENT: CardEvent,
     HistoryTable.SCENARIO_INSTANCE: ScenarioInstance,
     HistoryTable.TRANSACTION_LABEL: TransactionLabel,
+    HistoryTable.BALANCE_ENQUIRY_LABEL: BalanceEnquiryLabel,
 }
 
 # Ground truth: kept apart from what the bank observes, so models can't train on it by accident.
-TRUTH_TABLES = frozenset({HistoryTable.SCENARIO_INSTANCE, HistoryTable.TRANSACTION_LABEL})
+TRUTH_TABLES = frozenset(
+    {
+        HistoryTable.SCENARIO_INSTANCE,
+        HistoryTable.TRANSACTION_LABEL,
+        HistoryTable.BALANCE_ENQUIRY_LABEL,
+    }
+)
 
 
 class RowSink(Protocol):
@@ -133,7 +153,7 @@ class _FraudAttempt:
     action: FraudAction
 
 
-type _Planned = TransactionDraft | PlannedPayment | _FraudAttempt | CardBlock
+type _Planned = TransactionDraft | PlannedPayment | EnquiryDraft | _FraudAttempt | CardBlock
 
 
 @dataclass(slots=True)
@@ -199,6 +219,7 @@ class _Simulation:
         self._counts: dict[HistoryTable, int] = dict.fromkeys(HistoryTable, 0)
         self._declined_count = 0
         self._transaction_count = 0
+        self._enquiry_count = 0
 
         accounts = _group(reference.accounts, lambda a: a.customer_id)
         owner = {account.account_id: account.customer_id for account in reference.accounts}
@@ -260,9 +281,10 @@ class _Simulation:
             self._run_day(day)
             day += timedelta(days=1)
 
-        instances, fraud_labels = self._fraud.ground_truth.finish()
-        self._emit(HistoryTable.SCENARIO_INSTANCE, instances)
-        self._emit(HistoryTable.TRANSACTION_LABEL, fraud_labels)
+        truth = self._fraud.ground_truth.finish()
+        self._emit(HistoryTable.SCENARIO_INSTANCE, truth.scenarios)
+        self._emit(HistoryTable.TRANSACTION_LABEL, truth.transaction_labels)
+        self._emit(HistoryTable.BALANCE_ENQUIRY_LABEL, truth.enquiry_labels)
 
         logger.info("simulated history", extra={t.value: n for t, n in self._counts.items()})
         return HistorySummary(
@@ -270,7 +292,7 @@ class _Simulation:
             self._last_day,
             self._counts,
             self._declined_count,
-            fraud_count=len(fraud_labels),
+            fraud_count=len(truth.transaction_labels),
         )
 
     def _plan_fraud(
@@ -369,7 +391,7 @@ class _Simulation:
 
     def _owner_can_use(self, item: _Planned) -> bool:
         """Customers can't use a lost or blocked card, nor its replacement before it arrives."""
-        if not isinstance(item, TransactionDraft) or item.card_id is None:
+        if not isinstance(item, TransactionDraft | EnquiryDraft) or item.card_id is None:
             return True
         unusable_from = self._fraud.unusable_from.get(item.card_id)
         if unusable_from is not None and item.event_time >= unusable_from:
@@ -471,7 +493,7 @@ class _Simulation:
         return max(self._ledger.balance_cents(habits.credit_account.account_id), 0)
 
     def _settle(self, planned: list[_Planned]) -> tuple[list[Transaction], list[Transaction]]:
-        """Settle the day's transactions in time order, as the bank would.
+        """Settle the day's card blocks, balance checks and transactions in time order.
 
         Returns every transaction, and separately the ones no fraudster touched.
         """
@@ -482,15 +504,33 @@ class _Simulation:
             if isinstance(item, CardBlock):
                 self._ledger.block_card(item.card_id)
                 self._emit(HistoryTable.CARD_EVENT, [self._replacements.block(item)])
-                continue
-            if isinstance(item, _FraudAttempt):
-                settled = self._settle_action(item.action)
-                self._fraud.ground_truth.record(item.scenario_id, settled)
+            elif isinstance(item, EnquiryDraft):
+                enquiry = self._enquire(item)
+                self._emit(HistoryTable.BALANCE_ENQUIRY_LABEL, [normal_enquiry_label(enquiry)])
+            elif isinstance(item, _FraudAttempt):
+                transactions += self._settle_fraud(item)
             else:
                 settled = self._settle_action(item)
                 normal += settled
-            transactions += settled
+                transactions += settled
         return transactions, normal
+
+    def _settle_fraud(self, attempt: _FraudAttempt) -> list[Transaction]:
+        """Settle a fraudster's attempt and record it against its episode."""
+        action, truth = attempt.action, self._fraud.ground_truth
+        if isinstance(action, EnquiryDraft):
+            truth.record_enquiry(attempt.scenario_id, self._enquire(action))
+            return []
+        settled = self._settle_action(action)
+        truth.record(attempt.scenario_id, settled)
+        return settled
+
+    def _enquire(self, draft: EnquiryDraft) -> BalanceEnquiry:
+        """Answer a balance check and record it. Enquiries are numbered apart from transactions."""
+        self._enquiry_count += 1
+        enquiry = to_balance_enquiry(draft, self._enquiry_count, self._ledger.enquire(draft))
+        self._emit(HistoryTable.BALANCE_ENQUIRY, [enquiry])
+        return enquiry
 
     def _settle_action(self, action: TransactionDraft | PlannedPayment) -> list[Transaction]:
         if isinstance(action, TransactionDraft):

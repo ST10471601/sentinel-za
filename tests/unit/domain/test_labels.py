@@ -3,7 +3,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from sentinel.domain.labels import AccountLabel, FraudType, ScenarioInstance, TransactionLabel
+from sentinel.domain.labels import (
+    AccountLabel,
+    BalanceEnquiryLabel,
+    FraudType,
+    ScenarioInstance,
+    TransactionLabel,
+)
 
 STARTED_AT = datetime(2026, 2, 3, 22, 40, tzinfo=UTC)
 
@@ -83,8 +89,18 @@ def test_normal_label_has_no_fraud_fields() -> None:
     assert not TransactionLabel.model_validate(label_fields(**normal)).is_fraud
 
     for field, value in [("fraud_type", FraudType.APP_VISHING), ("reported_at", STARTED_AT)]:
-        with pytest.raises(ValidationError, match="normal transactions"):
+        with pytest.raises(ValidationError, match="normal labels"):
             TransactionLabel.model_validate(label_fields(**(normal | {field: value})))
+
+
+def test_balance_check_labels_follow_the_same_rules() -> None:
+    fields = label_fields()
+    fields["balance_enquiry_id"] = "BEQ-000000001"
+    del fields["transaction_id"]
+
+    assert BalanceEnquiryLabel.model_validate(fields).is_fraud
+    with pytest.raises(ValidationError, match="need fraud_type and scenario_id"):
+        BalanceEnquiryLabel.model_validate(fields | {"scenario_id": None})
 
 
 def test_mule_since_is_set_only_for_mules() -> None:

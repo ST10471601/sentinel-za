@@ -6,7 +6,7 @@ from datetime import date
 from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import Account, AccountType, Card
 from sentinel.domain.transactions import Channel, DeclineReason, Direction, TransactionStatus
-from sentinel.simulator.drafts import Settlement, TransactionDraft
+from sentinel.simulator.drafts import EnquiryDraft, Settlement, TransactionDraft
 
 
 class Ledger:
@@ -53,6 +53,13 @@ class Ledger:
             self._use_limit(draft)
 
         balance = self._post(draft)
+        return Settlement(TransactionStatus.APPROVED, None, balance)
+
+    def enquire(self, draft: EnquiryDraft) -> Settlement:
+        """Answer a balance check. Only a blocked card is turned away; nothing is posted."""
+        balance = self._balances[draft.account_id]
+        if draft.card_id in self._blocked_card_ids:
+            return Settlement(TransactionStatus.DECLINED, DeclineReason.CARD_BLOCKED, balance)
         return Settlement(TransactionStatus.APPROVED, None, balance)
 
     def _decline_reason(self, draft: TransactionDraft) -> DeclineReason | None:

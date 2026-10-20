@@ -7,10 +7,16 @@ import pytest
 
 from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import AccountType, Card, CardEvent, CardEventType
+from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary
 from sentinel.domain.devices import Device
-from sentinel.domain.labels import FraudType, ScenarioInstance, TransactionLabel
+from sentinel.domain.labels import (
+    BalanceEnquiryLabel,
+    FraudType,
+    ScenarioInstance,
+    TransactionLabel,
+)
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.transactions import (
     Channel,
@@ -56,6 +62,14 @@ class CollectedRows:
 
     def card_events(self) -> list[CardEvent]:
         return [row for row in self.rows[HistoryTable.CARD_EVENT] if isinstance(row, CardEvent)]
+
+    def enquiries(self) -> list[BalanceEnquiry]:
+        rows = self.rows[HistoryTable.BALANCE_ENQUIRY]
+        return [row for row in rows if isinstance(row, BalanceEnquiry)]
+
+    def enquiry_labels(self) -> list[BalanceEnquiryLabel]:
+        rows = self.rows[HistoryTable.BALANCE_ENQUIRY_LABEL]
+        return [row for row in rows if isinstance(row, BalanceEnquiryLabel)]
 
 
 @pytest.fixture(scope="module")
@@ -402,3 +416,25 @@ def test_the_victim_withdraws_cash_where_the_card_is_swapped(
         )
         swaps += 1
     assert swaps
+
+
+def test_every_balance_check_has_exactly_one_label(fraud_heavy_run: CollectedRows) -> None:
+    enquiries = fraud_heavy_run.enquiries()
+    labels = fraud_heavy_run.enquiry_labels()
+
+    assert enquiries
+    assert sorted(label.balance_enquiry_id for label in labels) == [
+        e.balance_enquiry_id for e in enquiries
+    ]
+
+
+def test_thieves_check_the_balance_on_the_stolen_card(fraud_heavy_run: CollectedRows) -> None:
+    stolen = {card_id for _, card_id in lost_stolen_cards(fraud_heavy_run).values()}
+    by_id = {e.balance_enquiry_id: e for e in fraud_heavy_run.enquiries()}
+    fraud = [label for label in fraud_heavy_run.enquiry_labels() if label.is_fraud]
+
+    assert fraud
+    assert len(fraud) < len(by_id) / 2  # customers check far more often than thieves
+    for label in fraud:
+        assert label.fraud_type is FraudType.CARD_PRESENT_LOST_STOLEN
+        assert by_id[label.balance_enquiry_id].card_id in stolen

@@ -1,6 +1,6 @@
 import random
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -15,6 +15,7 @@ from sentinel.domain.transactions import (
 )
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.card_activity import (
+    BALANCE_CHECK_SECONDS,
     CONTACTLESS_NO_PIN_LIMIT_CENTS,
     NEAREST_MERCHANT_COUNT,
     ZAR_PER_UNIT,
@@ -23,7 +24,13 @@ from sentinel.simulator.card_activity import (
     card_drafts,
     plan_card_habits,
 )
-from sentinel.simulator.drafts import Settlement, TransactionDraft, to_transaction
+from sentinel.simulator.drafts import (
+    EnquiryDraft,
+    Settlement,
+    TransactionDraft,
+    to_balance_enquiry,
+    to_transaction,
+)
 from sentinel.simulator.reference_data import ReferenceData
 from sentinel.simulator.spending import SPENDING_BY_BAND
 
@@ -55,9 +62,9 @@ def sample(
 
 def month_of_drafts(
     sample: list[tuple[Customer, CardHabits]], budget_cents: int = RICH, seed: int = 8
-) -> list[TransactionDraft]:
+) -> list[TransactionDraft | EnquiryDraft]:
     generator = random.Random(seed)
-    drafts: list[TransactionDraft] = []
+    drafts: list[TransactionDraft | EnquiryDraft] = []
     for customer, habits in sample:
         accounts = {habits.debit_card.account_id}
         if habits.credit_card:
@@ -70,8 +77,18 @@ def month_of_drafts(
 
 
 @pytest.fixture(scope="module")
-def drafts(sample: list[tuple[Customer, CardHabits]]) -> list[TransactionDraft]:
+def month(sample: list[tuple[Customer, CardHabits]]) -> list[TransactionDraft | EnquiryDraft]:
     return month_of_drafts(sample)
+
+
+@pytest.fixture(scope="module")
+def drafts(month: list[TransactionDraft | EnquiryDraft]) -> list[TransactionDraft]:
+    return [draft for draft in month if isinstance(draft, TransactionDraft)]
+
+
+@pytest.fixture(scope="module")
+def enquiries(month: list[TransactionDraft | EnquiryDraft]) -> list[EnquiryDraft]:
+    return [draft for draft in month if isinstance(draft, EnquiryDraft)]
 
 
 def test_habits_cover_every_spending_category_plus_atms(
@@ -159,6 +176,30 @@ def test_atm_withdrawals_use_the_debit_card_and_a_pin(
         assert draft.card_id is not None and card_type[draft.card_id] is CardType.DEBIT
         assert draft.auth_method is TransactionAuthMethod.PIN
         assert draft.amount_cents % 5_000 == 0
+
+
+def test_some_withdrawals_start_with_a_balance_check(
+    drafts: list[TransactionDraft],
+    enquiries: list[EnquiryDraft],
+    merchant_by_id: dict[str, Merchant],
+) -> None:
+    withdrawals: dict[tuple[str | None, str | None], list[datetime]] = defaultdict(list)
+    for draft in drafts:
+        if draft.channel is Channel.ATM:
+            withdrawals[(draft.card_id, draft.merchant_id)].append(draft.event_time)
+    low, high = (timedelta(seconds=s) for s in BALANCE_CHECK_SECONDS)
+
+    assert 0 < len(enquiries) < sum(map(len, withdrawals.values()))
+    for number, enquiry in enumerate(enquiries, start=1):
+        times = withdrawals[(enquiry.card_id, enquiry.merchant_id)]
+        assert any(low <= t - enquiry.event_time <= high for t in times)
+        assert merchant_by_id[enquiry.merchant_id].category is MerchantCategory.ATM
+        to_balance_enquiry(enquiry, number, APPROVED)
+
+
+def test_tighter_budgets_check_the_balance_more_often() -> None:
+    shares = [SPENDING_BY_BAND[band].balance_check_share for band in IncomeBand]
+    assert shares == sorted(shares, reverse=True)
 
 
 def test_most_purchases_are_at_favourite_merchants(

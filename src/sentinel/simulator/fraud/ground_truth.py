@@ -1,11 +1,12 @@
-"""Ground truth: a label for every transaction and a summary of every fraud episode."""
+"""Ground truth: a label for every transaction and enquiry, and a summary of every episode."""
 
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sentinel.domain.labels import ScenarioInstance, TransactionLabel
+from sentinel.domain.balance_enquiries import BalanceEnquiry
+from sentinel.domain.labels import BalanceEnquiryLabel, ScenarioInstance, TransactionLabel
 from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
 from sentinel.simulator.fraud.episodes import Episode
 
@@ -15,6 +16,16 @@ class _Outcome:
     episode: Episode
     reported_at: datetime | None
     transactions: list[Transaction] = field(default_factory=list)
+    enquiries: list[BalanceEnquiry] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class TruthRows:
+    """Everything ground truth produces once the run ends."""
+
+    scenarios: list[ScenarioInstance]
+    transaction_labels: list[TransactionLabel]
+    enquiry_labels: list[BalanceEnquiryLabel]
 
 
 class GroundTruth:
@@ -31,26 +42,40 @@ class GroundTruth:
         """Note the transactions an episode's attempt produced, approved or declined."""
         self._outcomes[scenario_id].transactions.extend(transactions)
 
-    def finish(self) -> tuple[list[ScenarioInstance], list[TransactionLabel]]:
-        """Summarise every episode that happened and label its transactions."""
-        instances: list[ScenarioInstance] = []
-        labels: list[TransactionLabel] = []
+    def record_enquiry(self, scenario_id: str, enquiry: BalanceEnquiry) -> None:
+        """Note a balance check the fraudster made."""
+        self._outcomes[scenario_id].enquiries.append(enquiry)
+
+    def finish(self) -> TruthRows:
+        """Summarise every episode that happened and label what its fraudster did."""
+        rows = TruthRows([], [], [])
         for outcome in self._outcomes.values():
-            if not outcome.transactions:
+            if not outcome.transactions and not outcome.enquiries:
                 continue  # planned to start after the run ended
             instance = _summarise(outcome)
-            instances.append(instance)
-            labels += [
+            fraud_type, scenario_id = instance.fraud_type, instance.scenario_id
+            rows.scenarios.append(instance)
+            rows.transaction_labels.extend(
                 TransactionLabel(
                     transaction_id=transaction.transaction_id,
                     is_fraud=True,
-                    fraud_type=instance.fraud_type,
-                    scenario_id=instance.scenario_id,
+                    fraud_type=fraud_type,
+                    scenario_id=scenario_id,
                     reported_at=outcome.reported_at,
                 )
                 for transaction in outcome.transactions
-            ]
-        return instances, labels
+            )
+            rows.enquiry_labels.extend(
+                BalanceEnquiryLabel(
+                    balance_enquiry_id=enquiry.balance_enquiry_id,
+                    is_fraud=True,
+                    fraud_type=fraud_type,
+                    scenario_id=scenario_id,
+                    reported_at=outcome.reported_at,
+                )
+                for enquiry in outcome.enquiries
+            )
+        return rows
 
 
 def normal_labels(transactions: Iterable[Transaction]) -> list[TransactionLabel]:
@@ -67,9 +92,21 @@ def normal_labels(transactions: Iterable[Transaction]) -> list[TransactionLabel]
     ]
 
 
+def normal_enquiry_label(enquiry: BalanceEnquiry) -> BalanceEnquiryLabel:
+    """The label for a balance check the cardholder made."""
+    return BalanceEnquiryLabel(
+        balance_enquiry_id=enquiry.balance_enquiry_id,
+        is_fraud=False,
+        fraud_type=None,
+        scenario_id=None,
+        reported_at=None,
+    )
+
+
 def _summarise(outcome: _Outcome) -> ScenarioInstance:
     episode, transactions = outcome.episode, outcome.transactions
-    times = [transaction.event_time for transaction in transactions]
+    # A fraudster's balance check can come before the first transaction.
+    times = [t.event_time for t in transactions] + [e.event_time for e in outcome.enquiries]
     # Only money that left an account counts as stolen; a transfer's credit leg is the same money.
     stolen = sum(
         t.amount_cents
