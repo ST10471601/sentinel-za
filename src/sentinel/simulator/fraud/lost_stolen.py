@@ -172,9 +172,12 @@ class LostStolen:
         if not self._online_abroad:
             raise SimulationError("no foreign online merchants for lost or stolen card fraud")
 
-    def can_target(self, victim: Victim) -> bool:
-        """Every customer carries a debit card."""
-        return any(card.card_type is CardType.DEBIT for card in victim.cards)
+    def choose_victim(
+        self, rng: random.Random, candidates: Sequence[Victim], start: datetime
+    ) -> Victim | None:
+        """Anyone carrying a debit card, which every customer does."""
+        targets = [victim for victim in candidates if _has_debit_card(victim)]
+        return rng.choice(targets) if targets else None
 
     def plan(
         self, rng: random.Random, victim: Victim, start: datetime, scenario_id: str
@@ -252,6 +255,10 @@ class LostStolen:
             merchant = rng.choice(self._online_abroad)
             drafts.append(online_purchase_draft(card, merchant, amount, moment))
         return drafts
+
+
+def _has_debit_card(victim: Victim) -> bool:
+    return any(card.card_type is CardType.DEBIT for card in victim.cards)
 
 
 def _pick_card(rng: random.Random, cards: Sequence[Card]) -> Card:

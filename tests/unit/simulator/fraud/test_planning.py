@@ -1,5 +1,6 @@
 import random
 from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 
 import pytest
@@ -21,15 +22,19 @@ PERIOD = (date(2026, 1, 1), date(2026, 3, 31))
 
 
 class FakeScenario:
-    """Records when each episode starts; targets only customers it is told to."""
+    """Records when each episode starts; finds a victim only if it is told to."""
 
     def __init__(self, fraud_type: FraudType, targets_anyone: bool = True) -> None:
         self.fraud_type = fraud_type
         self._targets_anyone = targets_anyone
+        self.chosen_for: list[datetime] = []
         self.starts: list[datetime] = []
 
-    def can_target(self, victim: Victim) -> bool:
-        return self._targets_anyone
+    def choose_victim(
+        self, rng: random.Random, candidates: Sequence[Victim], start: datetime
+    ) -> Victim | None:
+        self.chosen_for.append(start)
+        return rng.choice(candidates) if self._targets_anyone else None
 
     def plan(
         self, rng: random.Random, victim: Victim, start: datetime, scenario_id: str
@@ -74,6 +79,7 @@ def test_each_episode_has_its_own_victim_id_and_a_start_in_the_period(
 
     assert [e.scenario_id for e in episodes] == [f"SCN-{n:07d}" for n in range(1, 51)]
     assert len({e.victim_customer_id for e in episodes}) == 50
+    assert scenario.chosen_for == scenario.starts  # the victim is chosen for that start
     for start in scenario.starts:
         assert start.tzinfo is UTC
         assert PERIOD[0] <= to_sast(start).date() <= PERIOD[1]
@@ -91,7 +97,7 @@ def test_scenarios_are_mixed_in_their_fraud_mix_proportions(victims: list[Victim
     assert counts[rare.fraud_type] == pytest.approx(expected_rare, abs=15)
 
 
-def test_scenarios_only_get_victims_they_can_target(victims: list[Victim]) -> None:
+def test_no_episode_is_planned_when_a_scenario_finds_no_victim(victims: list[Victim]) -> None:
     nobody = FakeScenario(FraudType.SIM_SWAP_TAKEOVER, targets_anyone=False)
     assert plan_episodes(random.Random(3), [nobody], victims, PERIOD, 5, IdSequence("SCN")) == []
 

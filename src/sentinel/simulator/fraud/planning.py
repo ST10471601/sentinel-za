@@ -70,11 +70,10 @@ def plan_episodes(
     episodes: list[Episode] = []
     for _ in range(count):
         scenario = pick(rng, weights)
-        candidates = [victim for victim in untouched if scenario.can_target(victim)]
-        if not candidates:
-            continue
-        victim = rng.choice(candidates)
-        untouched.remove(victim)
         start = random_datetime_between(rng, window_start, window_end).astimezone(UTC)
+        victim = scenario.choose_victim(rng, untouched, start)
+        if victim is None:
+            continue
+        untouched.remove(victim)
         episodes.append(scenario.plan(rng, victim, start, scenario_ids.next_id()))
     return episodes

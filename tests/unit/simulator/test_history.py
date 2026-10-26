@@ -27,7 +27,7 @@ from sentinel.domain.transactions import (
     TransactionStatus,
 )
 from sentinel.simulator.card_replacement import REPLACEMENT_DAYS
-from sentinel.simulator.fraud.planning import FraudSettings
+from sentinel.simulator.fraud.planning import FRAUD_MIX, FraudSettings
 from sentinel.simulator.history import HistorySummary, HistoryTable, simulate_history
 from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
 
@@ -426,14 +426,38 @@ def test_the_victim_withdraws_cash_where_the_card_is_swapped(
     assert swaps
 
 
-def test_the_card_is_skimmed_during_a_genuine_transaction(fraud_heavy_run: CollectedRows) -> None:
-    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
-    genuine = [t for t in fraud_heavy_run.transactions() if t.transaction_id not in fraud_ids]
-    cloned = fraud_cards(fraud_heavy_run, FraudType.CARD_PRESENT_COUNTERFEIT)
+@pytest.fixture(scope="module")
+def counterfeit_run(reference: ReferenceData) -> CollectedRows:
+    """About half the fraud is counterfeit, over three months, so several sites skim in the run."""
+    sink = CollectedRows()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(FRAUD_MIX, FraudType.CARD_PRESENT_COUNTERFEIT, 0.5)
+        simulate_history(reference, 3, sink, FraudSettings(300.0, unreported_share=0.0))
+    return sink
 
-    assert cloned
-    for scenario, card_id in cloned.values():
-        params = json.loads(scenario.params)
+
+def skimmed_in_run(
+    rows: CollectedRows, reference: ReferenceData
+) -> list[tuple[dict[str, str], str]]:
+    """Each cloned card's params and ID, for cards skimmed after the data begins."""
+    cloned = fraud_cards(rows, FraudType.CARD_PRESENT_COUNTERFEIT).values()
+    params = [(json.loads(scenario.params), card_id) for scenario, card_id in cloned]
+    return [
+        (p, card_id)
+        for p, card_id in params
+        if datetime.fromisoformat(p["skimmed_at"]) >= reference.simulation_start
+    ]
+
+
+def test_the_card_is_skimmed_during_a_genuine_transaction(
+    reference: ReferenceData, counterfeit_run: CollectedRows
+) -> None:
+    fraud_ids = {label.transaction_id for label in counterfeit_run.labels() if label.is_fraud}
+    genuine = [t for t in counterfeit_run.transactions() if t.transaction_id not in fraud_ids]
+    skimmed = skimmed_in_run(counterfeit_run, reference)
+
+    assert skimmed
+    for params, card_id in skimmed:
         skimmed_at = datetime.fromisoformat(params["skimmed_at"])
         assert any(
             t.card_id == card_id
@@ -443,16 +467,60 @@ def test_the_card_is_skimmed_during_a_genuine_transaction(fraud_heavy_run: Colle
         )
 
 
-def test_the_owner_keeps_using_the_card_while_its_clone_is_swiped(
-    fraud_heavy_run: CollectedRows,
+def test_a_sites_victims_all_took_cash_there_while_the_skimmer_was_fitted(
+    reference: ReferenceData, counterfeit_run: CollectedRows
 ) -> None:
-    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    fraud_ids = {label.transaction_id for label in counterfeit_run.labels() if label.is_fraud}
+    victims_by_site: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for params, card_id in skimmed_in_run(counterfeit_run, reference):
+        if "site_opens" in params:
+            site = (params["skim_merchant_id"], params["site_opens"], params["site_closes"])
+            victims_by_site[site].add(card_id)
+
+    # What the bank sees: several cards with fraud elsewhere all used one ATM in the same weeks.
+    assert any(len(cards) > 1 for cards in victims_by_site.values())
+    for (atm_id, opens, closes), cards in victims_by_site.items():
+        used_there = {
+            t.card_id
+            for t in counterfeit_run.transactions()
+            if t.transaction_id not in fraud_ids
+            and t.merchant_id == atm_id
+            and opens <= to_sast(t.event_time).date().isoformat() <= closes
+        }
+        assert cards <= used_there
+
+
+def test_a_crews_clones_pass_through_one_atm_within_minutes(
+    counterfeit_run: CollectedRows,
+) -> None:
+    fraud = {label.transaction_id: label for label in counterfeit_run.labels() if label.is_fraud}
+    visits = [
+        (t.merchant_id, t.event_time, t.card_id)
+        for t in counterfeit_run.transactions()
+        if t.channel is Channel.ATM
+        and t.transaction_id in fraud
+        and fraud[t.transaction_id].fraud_type is FraudType.CARD_PRESENT_COUNTERFEIT
+    ]
+
+    assert any(
+        atm == other_atm
+        and card != other_card
+        and timedelta(0) < later - moment <= timedelta(minutes=15)
+        for atm, moment, card in visits
+        for other_atm, later, other_card in visits
+    )
+
+
+def test_the_owner_keeps_using_the_card_while_its_clone_is_swiped(
+    counterfeit_run: CollectedRows,
+) -> None:
+    fraud_ids = {label.transaction_id for label in counterfeit_run.labels() if label.is_fraud}
     by_card: dict[str | None, list[Transaction]] = defaultdict(list)
-    for t in fraud_heavy_run.transactions():
+    for t in counterfeit_run.transactions():
         by_card[t.card_id].append(t)
     in_two_places = 0
 
-    for _, card_id in fraud_cards(fraud_heavy_run, FraudType.CARD_PRESENT_COUNTERFEIT).values():
+    for _, card_id in fraud_cards(counterfeit_run, FraudType.CARD_PRESENT_COUNTERFEIT).values():
         clone = [t for t in by_card[card_id] if t.transaction_id in fraud_ids]
         own = [t for t in by_card[card_id] if t.transaction_id not in fraud_ids]
         assert {t.entry_mode for t in clone} == {EntryMode.MAGSTRIPE}
