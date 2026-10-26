@@ -11,6 +11,7 @@ from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.transactions import Channel, EntryMode, TransactionAuthMethod
 from sentinel.simulator.card_activity import HOME_COUNTRY
 from sentinel.simulator.drafts import TransactionDraft
+from sentinel.simulator.fraud.cash_out import Round
 from sentinel.simulator.fraud.episodes import Victim
 from sentinel.simulator.fraud.lost_stolen import (
     CALL_SECONDS,
@@ -21,7 +22,6 @@ from sentinel.simulator.fraud.lost_stolen import (
     THEFT_HOURS,
     LostStolen,
     LostStolenEpisode,
-    Round,
 )
 from sentinel.simulator.fraud.reports import plan_card_block
 from sentinel.simulator.reference_data import ReferenceData

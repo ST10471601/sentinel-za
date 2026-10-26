@@ -43,6 +43,10 @@ LEGIT_FOREIGN_CATEGORIES = frozenset(
 # Simulation assumption: seconds between checking the balance and withdrawing at the same ATM.
 BALANCE_CHECK_SECONDS = (20, 90)
 
+# Simulation assumption: now and then a chip can't be read and the terminal falls back to the
+# stripe. Without this, every swiped card would be a counterfeit clone.
+MAGSTRIPE_FALLBACK_SHARE = 0.005
+
 # Simulation assumptions: tap-to-pay needs no PIN up to R500, and fixed exchange rates.
 CONTACTLESS_NO_PIN_LIMIT_CENTS = 50_000
 CURRENCY_BY_COUNTRY: dict[str, str] = {
@@ -156,7 +160,8 @@ def card_drafts(
             if chance(rng, profile.balance_check_share):
                 checked_at = event_time - timedelta(seconds=rng.randint(*BALANCE_CHECK_SECONDS))
                 drafts.append(balance_enquiry_draft(habits.debit_card, atm, checked_at))
-            drafts.append(atm_withdrawal_draft(habits.debit_card, atm, amount, event_time))
+            withdrawal = atm_withdrawal_draft(habits.debit_card, atm, amount, event_time)
+            drafts.append(_read_chip(rng, withdrawal))
 
     return drafts
 
@@ -175,7 +180,8 @@ def purchase_draft(
         return online_purchase_draft(card, merchant, amount_cents, event_time)
 
     is_contactless = chance(rng, contactless_share)
-    return store_purchase_draft(card, merchant, amount_cents, event_time, is_contactless)
+    draft = store_purchase_draft(card, merchant, amount_cents, event_time, is_contactless)
+    return draft if is_contactless else _read_chip(rng, draft)
 
 
 def store_purchase_draft(
@@ -250,6 +256,16 @@ def balance_enquiry_draft(card: Card, atm: Merchant, event_time: datetime) -> En
         terminal_lat=atm.lat,
         terminal_lon=atm.lon,
     )
+
+
+def swiped(draft: TransactionDraft) -> TransactionDraft:
+    """The same card transaction, read from the magnetic stripe instead of the chip."""
+    return replace(draft, entry_mode=EntryMode.MAGSTRIPE)
+
+
+def _read_chip(rng: random.Random, draft: TransactionDraft) -> TransactionDraft:
+    """The chip, or the stripe on the rare occasion the chip can't be read."""
+    return swiped(draft) if chance(rng, MAGSTRIPE_FALLBACK_SHARE) else draft
 
 
 def _pick_merchant(rng: random.Random, habits: CardHabits, category: MerchantCategory) -> Merchant:
