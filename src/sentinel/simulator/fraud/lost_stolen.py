@@ -7,7 +7,7 @@ card types.
 """
 
 import random
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
@@ -18,15 +18,14 @@ from sentinel.domain.customers import Customer
 from sentinel.domain.labels import FraudType
 from sentinel.domain.merchants import Merchant, MerchantCategory
 from sentinel.simulator.card_activity import (
-    BALANCE_CHECK_SECONDS,
     HOME_COUNTRY,
     MerchantIndex,
     atm_withdrawal_draft,
-    balance_enquiry_draft,
     online_purchase_draft,
     store_purchase_draft,
 )
-from sentinel.simulator.drafts import EnquiryDraft, TransactionDraft
+from sentinel.simulator.drafts import TransactionDraft
+from sentinel.simulator.fraud.cash_out import DRIVE_SECONDS, Round, cash_cents, take_cash
 from sentinel.simulator.fraud.episodes import (
     Balances,
     CardLoss,
@@ -36,7 +35,7 @@ from sentinel.simulator.fraud.episodes import (
     Victim,
 )
 from sentinel.simulator.randomness import chance, log_uniform_int, random_datetime_between
-from sentinel.simulator.spending import ATM_STEP_CENTS, atm_amount
+from sentinel.simulator.spending import atm_amount
 
 DEBIT_CARD_SHARE = 0.88  # debit losses R253.0m vs credit R34.2m
 # Share of losses abroad, used as the share of episodes with online use abroad.
@@ -44,7 +43,6 @@ ONLINE_ABROAD_SHARE: dict[CardType, float] = {CardType.DEBIT: 0.235, CardType.CR
 
 # Simulation assumptions from here on.
 PIN_KNOWN_SHARE = 0.7  # taken at an ATM with the PIN seen; otherwise lost or pickpocketed
-THIEF_BALANCE_CHECK_SHARE = 0.8  # checks what there is to take before the first withdrawal
 THEFT_HOURS = (time(8), time(18))
 VICTIM_WITHDRAWAL_LEAD_SECONDS = (30, 180)  # the victim's own withdrawal, just before the swap
 FIRST_USE_SECONDS = (300, 2_700)  # 5 to 45 minutes after the theft
@@ -54,11 +52,6 @@ RETRY_GAP_SECONDS = (120, 1_800)
 RETRIES = (1, 2)  # tries after the block, which decline
 
 NEARBY_MERCHANTS = 6  # the thief stays close to where the card was taken
-ATMS_PER_ROUND = (2, 4)
-WITHDRAWALS_PER_ATM = (1, 3)
-CASH_CENTS = (100_000, 300_000)  # R1,000 to R3,000 per withdrawal
-ATM_GAP_SECONDS = (30, 180)  # between withdrawals at one ATM
-DRIVE_SECONDS = (300, 1_500)  # between ATMs and shops
 PIN_PURCHASES = (1, 3)
 PIN_PURCHASE_CENTS = (20_000, 250_000)
 TAPS = (4, 12)
@@ -73,14 +66,6 @@ TAP_CATEGORIES = (MerchantCategory.GROCERY, MerchantCategory.FUEL, MerchantCateg
 ONLINE_ABROAD_CATEGORIES = frozenset(
     {MerchantCategory.ONLINE_RETAIL, MerchantCategory.DIGITAL_GOODS, MerchantCategory.TRAVEL_AGENCY}
 )
-
-
-@dataclass(frozen=True, slots=True)
-class Round:
-    """A spree between two times. How much it takes depends on the balance when it starts."""
-
-    start: datetime
-    end: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,21 +127,7 @@ class LostStolenEpisode:
         self, rng: random.Random, spree: Round, available_cents: int
     ) -> list[FraudAction]:
         """Withdraw until the money or the daily ATM limit runs out, then buy with chip and PIN."""
-        target = min(available_cents, self.card.daily_atm_limit_cents)
-        drafts: list[FraudAction] = []
-        taken = 0
-        moment = spree.start
-        for number, (atm, moment) in enumerate(self._atm_visits(rng, spree.start)):
-            is_first = number == 0
-            # The withdrawal that goes past the target is the one that declines.
-            if moment >= spree.end or (not is_first and taken >= target):
-                break
-            if is_first and chance(rng, THIEF_BALANCE_CHECK_SHARE):
-                drafts.append(_balance_check(rng, self.card, atm, moment))
-            amount = _cash_cents(rng)
-            drafts.append(atm_withdrawal_draft(self.card, atm, amount, moment))
-            taken += amount
-
+        drafts, moment = take_cash(rng, self.card, self.atms, spree, available_cents)
         for _ in range(rng.randint(*PIN_PURCHASES)):
             moment += _seconds(rng, DRIVE_SECONDS)
             if moment >= spree.end:
@@ -165,18 +136,6 @@ class LostStolenEpisode:
             shop = rng.choice(self.shops)
             drafts.append(store_purchase_draft(self.card, shop, amount, moment, False))
         return drafts
-
-    def _atm_visits(
-        self, rng: random.Random, start: datetime
-    ) -> Iterator[tuple[Merchant, datetime]]:
-        """A few nearby ATMs, one after another, with one to three withdrawals at each."""
-        moment = start
-        count = min(rng.randint(*ATMS_PER_ROUND), len(self.atms))
-        for atm in rng.sample(self.atms, count):
-            for _ in range(rng.randint(*WITHDRAWALS_PER_ATM)):
-                yield atm, moment
-                moment += _seconds(rng, ATM_GAP_SECONDS)
-            moment += _seconds(rng, DRIVE_SECONDS)
 
     def _tap(self, rng: random.Random, spree: Round, available_cents: int) -> list[FraudAction]:
         """Contactless taps under the no-PIN limit until one declines."""
@@ -333,22 +292,11 @@ def _plan_retries(
     for _ in range(rng.randint(*RETRIES)):
         moment += _seconds(rng, RETRY_GAP_SECONDS)
         if is_pin_known:
-            drafts.append(atm_withdrawal_draft(card, rng.choice(atms), _cash_cents(rng), moment))
+            drafts.append(atm_withdrawal_draft(card, rng.choice(atms), cash_cents(rng), moment))
         else:
             amount = rng.randint(*TAP_CENTS)
             drafts.append(store_purchase_draft(card, rng.choice(shops), amount, moment, True))
     return drafts
-
-
-def _balance_check(
-    rng: random.Random, card: Card, atm: Merchant, withdrawn_at: datetime
-) -> EnquiryDraft:
-    """A balance check at the ATM, a moment before the withdrawal."""
-    return balance_enquiry_draft(card, atm, withdrawn_at - _seconds(rng, BALANCE_CHECK_SECONDS))
-
-
-def _cash_cents(rng: random.Random) -> int:
-    return rng.randint(*CASH_CENTS) // ATM_STEP_CENTS * ATM_STEP_CENTS
 
 
 def _seconds(rng: random.Random, bounds: tuple[int, int]) -> timedelta:

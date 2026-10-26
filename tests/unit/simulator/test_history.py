@@ -22,6 +22,7 @@ from sentinel.domain.transactions import (
     Channel,
     DeclineReason,
     Direction,
+    EntryMode,
     Transaction,
     TransactionStatus,
 )
@@ -33,7 +34,12 @@ from sentinel.simulator.reference_data import ReferenceData, generate_reference_
 SEED = 21
 CUSTOMERS = 150
 MONTHS = 1
-INJECTED_FRAUD_TYPES = {FraudType.CARD_NOT_PRESENT, FraudType.CARD_PRESENT_LOST_STOLEN}
+INJECTED_FRAUD_TYPES = {
+    FraudType.CARD_NOT_PRESENT,
+    FraudType.CARD_PRESENT_LOST_STOLEN,
+    FraudType.CARD_PRESENT_COUNTERFEIT,
+}
+CARD_AND_PIN_FRAUD_TYPES = {FraudType.CARD_PRESENT_LOST_STOLEN, FraudType.CARD_PRESENT_COUNTERFEIT}
 BLOCK_EVENTS = {CardEventType.BLOCKED, CardEventType.REPORTED_LOST}
 
 
@@ -331,13 +337,11 @@ def test_unreported_fraud_blocks_only_cards_reported_lost(reference: ReferenceDa
     assert {e.event_type for e in blocks} == {CardEventType.REPORTED_LOST}
 
 
-def lost_stolen_cards(rows: CollectedRows) -> dict[str, tuple[ScenarioInstance, str]]:
-    """Each lost or stolen card episode, with the card the thief used."""
-    episodes = {
-        s.scenario_id: s
-        for s in rows.scenarios()
-        if s.fraud_type is FraudType.CARD_PRESENT_LOST_STOLEN
-    }
+def fraud_cards(
+    rows: CollectedRows, fraud_type: FraudType
+) -> dict[str, tuple[ScenarioInstance, str]]:
+    """Each card fraud episode of one type, with the card the fraudster used."""
+    episodes = {s.scenario_id: s for s in rows.scenarios() if s.fraud_type is fraud_type}
     transactions = {t.transaction_id: t for t in rows.transactions()}
     cards: dict[str, tuple[ScenarioInstance, str]] = {}
     for label in rows.labels():
@@ -359,7 +363,7 @@ def call_time(scenario: ScenarioInstance) -> datetime:
 def test_lost_cards_are_blocked_at_the_call_and_the_thief_is_declined(
     fraud_heavy_run: CollectedRows,
 ) -> None:
-    stolen = lost_stolen_cards(fraud_heavy_run)
+    stolen = fraud_cards(fraud_heavy_run, FraudType.CARD_PRESENT_LOST_STOLEN)
     reported_lost = {
         e.card_id
         for e in fraud_heavy_run.card_events()
@@ -387,7 +391,9 @@ def test_owners_stop_using_a_card_when_it_is_stolen(fraud_heavy_run: CollectedRo
     fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
     lost_at = {
         card_id: datetime.fromisoformat(json.loads(scenario.params)["lost_at"])
-        for scenario, card_id in lost_stolen_cards(fraud_heavy_run).values()
+        for scenario, card_id in fraud_cards(
+            fraud_heavy_run, FraudType.CARD_PRESENT_LOST_STOLEN
+        ).values()
     }
 
     for t in fraud_heavy_run.transactions():
@@ -402,7 +408,9 @@ def test_the_victim_withdraws_cash_where_the_card_is_swapped(
     genuine = [t for t in fraud_heavy_run.transactions() if t.transaction_id not in fraud_ids]
     swaps = 0
 
-    for scenario, card_id in lost_stolen_cards(fraud_heavy_run).values():
+    for scenario, card_id in fraud_cards(
+        fraud_heavy_run, FraudType.CARD_PRESENT_LOST_STOLEN
+    ).values():
         params = json.loads(scenario.params)
         if not params["pin_known"]:
             continue
@@ -418,6 +426,42 @@ def test_the_victim_withdraws_cash_where_the_card_is_swapped(
     assert swaps
 
 
+def test_the_card_is_skimmed_during_a_genuine_transaction(fraud_heavy_run: CollectedRows) -> None:
+    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    genuine = [t for t in fraud_heavy_run.transactions() if t.transaction_id not in fraud_ids]
+    cloned = fraud_cards(fraud_heavy_run, FraudType.CARD_PRESENT_COUNTERFEIT)
+
+    assert cloned
+    for scenario, card_id in cloned.values():
+        params = json.loads(scenario.params)
+        skimmed_at = datetime.fromisoformat(params["skimmed_at"])
+        assert any(
+            t.card_id == card_id
+            and t.merchant_id == params["skim_merchant_id"]
+            and t.event_time == skimmed_at
+            for t in genuine
+        )
+
+
+def test_the_owner_keeps_using_the_card_while_its_clone_is_swiped(
+    fraud_heavy_run: CollectedRows,
+) -> None:
+    fraud_ids = {label.transaction_id for label in fraud_heavy_run.labels() if label.is_fraud}
+    by_card: dict[str | None, list[Transaction]] = defaultdict(list)
+    for t in fraud_heavy_run.transactions():
+        by_card[t.card_id].append(t)
+    in_two_places = 0
+
+    for _, card_id in fraud_cards(fraud_heavy_run, FraudType.CARD_PRESENT_COUNTERFEIT).values():
+        clone = [t for t in by_card[card_id] if t.transaction_id in fraud_ids]
+        own = [t for t in by_card[card_id] if t.transaction_id not in fraud_ids]
+        assert {t.entry_mode for t in clone} == {EntryMode.MAGSTRIPE}
+        # The impossible-travel signal: the same card used by its owner within a day.
+        if any(abs(o.event_time - c.event_time) < timedelta(days=1) for o in own for c in clone):
+            in_two_places += 1
+    assert in_two_places
+
+
 def test_every_balance_check_has_exactly_one_label(fraud_heavy_run: CollectedRows) -> None:
     enquiries = fraud_heavy_run.enquiries()
     labels = fraud_heavy_run.enquiry_labels()
@@ -428,13 +472,19 @@ def test_every_balance_check_has_exactly_one_label(fraud_heavy_run: CollectedRow
     ]
 
 
-def test_thieves_check_the_balance_on_the_stolen_card(fraud_heavy_run: CollectedRows) -> None:
-    stolen = {card_id for _, card_id in lost_stolen_cards(fraud_heavy_run).values()}
+def test_fraudsters_check_the_balance_on_the_card_they_hold(
+    fraud_heavy_run: CollectedRows,
+) -> None:
+    held = {
+        card_id
+        for fraud_type in CARD_AND_PIN_FRAUD_TYPES
+        for _, card_id in fraud_cards(fraud_heavy_run, fraud_type).values()
+    }
     by_id = {e.balance_enquiry_id: e for e in fraud_heavy_run.enquiries()}
     fraud = [label for label in fraud_heavy_run.enquiry_labels() if label.is_fraud]
 
     assert fraud
-    assert len(fraud) < len(by_id) / 2  # customers check far more often than thieves
+    assert len(fraud) < len(by_id) / 2  # customers check far more often than fraudsters
     for label in fraud:
-        assert label.fraud_type is FraudType.CARD_PRESENT_LOST_STOLEN
-        assert by_id[label.balance_enquiry_id].card_id in stolen
+        assert label.fraud_type in CARD_AND_PIN_FRAUD_TYPES
+        assert by_id[label.balance_enquiry_id].card_id in held

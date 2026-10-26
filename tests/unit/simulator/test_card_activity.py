@@ -154,6 +154,15 @@ def test_in_store_purchases_happen_at_the_shop_with_pin_rules(
             assert draft.amount_cents <= CONTACTLESS_NO_PIN_LIMIT_CENTS
 
 
+def test_a_few_chip_reads_fall_back_to_the_stripe(drafts: list[TransactionDraft]) -> None:
+    inserted = [d for d in drafts if d.entry_mode in {EntryMode.CHIP, EntryMode.MAGSTRIPE}]
+    stripe = [d for d in inserted if d.entry_mode is EntryMode.MAGSTRIPE]
+
+    assert 0 < len(stripe) < 0.02 * len(inserted)
+    assert {d.channel for d in stripe} == {Channel.CARD_PRESENT, Channel.ATM}
+    assert all(d.auth_method is TransactionAuthMethod.PIN for d in stripe)
+
+
 def test_foreign_online_purchases_keep_the_original_currency(
     drafts: list[TransactionDraft],
 ) -> None:

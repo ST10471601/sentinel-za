@@ -35,6 +35,7 @@ from sentinel.simulator.drafts import (
     to_transaction,
 )
 from sentinel.simulator.fraud.card_not_present import CardNotPresent
+from sentinel.simulator.fraud.counterfeit import Counterfeit
 from sentinel.simulator.fraud.episodes import Episode, FraudAction, Scenario, Victim
 from sentinel.simulator.fraud.ground_truth import (
     GroundTruth,
@@ -302,6 +303,7 @@ class _Simulation:
         scenarios: list[Scenario] = [
             CardNotPresent(reference.merchants),
             LostStolen(reference.merchants),
+            Counterfeit(reference.merchants),
         ]
         victims = [Victim(plan.customer, plan.cards, plan.payments) for plan in self._plans]
         episodes = plan_episodes(
