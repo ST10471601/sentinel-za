@@ -17,6 +17,7 @@ from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.customers import Customer
 from sentinel.domain.devices import CustomerDevice, Device
 from sentinel.domain.labels import BalanceEnquiryLabel, ScenarioInstance, TransactionLabel
+from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
 from sentinel.simulator.beneficiaries import generate_beneficiaries
@@ -305,7 +306,15 @@ class _Simulation:
             LostStolen(reference.merchants),
             Counterfeit(reference.merchants),
         ]
-        victims = [Victim(plan.customer, plan.cards, plan.payments) for plan in self._plans]
+        victims = [
+            Victim(
+                plan.customer,
+                plan.cards,
+                plan.payments,
+                plan.card_habits.favourites[MerchantCategory.ATM],
+            )
+            for plan in self._plans
+        ]
         episodes = plan_episodes(
             make_rng(reference.seed, "fraud"),
             scenarios,

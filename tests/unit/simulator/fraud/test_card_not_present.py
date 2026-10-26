@@ -1,4 +1,5 @@
 import random
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -88,8 +89,11 @@ def test_credit_cards_are_used_only_when_the_victim_has_one(
 
 
 def test_victim_needs_a_card(scenario: CardNotPresent, victims: list[Victim]) -> None:
-    assert scenario.can_target(victims[0])
-    assert not scenario.can_target(Victim(victims[0].customer, (), victims[0].payments))
+    rng = random.Random(1)
+    no_cards = replace(victims[0], cards=())
+
+    assert scenario.choose_victim(rng, [no_cards, victims[1]], START) == victims[1]
+    assert scenario.choose_victim(rng, [no_cards], START) is None
 
 
 def test_victim_without_a_debit_card_is_an_error(
@@ -102,7 +106,7 @@ def test_victim_without_a_debit_card_is_an_error(
     with pytest.raises(SimulationError, match="no debit card"):
         scenario.plan(
             random.Random(1),
-            Victim(victim.customer, credit_only, victim.payments),
+            replace(victim, cards=credit_only),
             START,
             "SCN-0000001",
         )

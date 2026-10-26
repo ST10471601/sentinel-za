@@ -1,7 +1,7 @@
 """The common shape of every fraud scenario, and of one fraud episode against a victim."""
 
 import random
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Protocol
@@ -10,6 +10,7 @@ from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import Card
 from sentinel.domain.customers import Customer
 from sentinel.domain.labels import FraudType
+from sentinel.domain.merchants import Merchant
 from sentinel.simulator.drafts import EnquiryDraft, TransactionDraft
 from sentinel.simulator.payments import PaymentHabits, PlannedPayment
 
@@ -19,11 +20,12 @@ type FraudAction = TransactionDraft | PlannedPayment | EnquiryDraft
 
 @dataclass(frozen=True, slots=True)
 class Victim:
-    """What a fraudster can get at: the customer's cards, accounts, payees and devices."""
+    """What a fraudster can get at: the customer's cards, accounts, payees, devices and ATMs."""
 
     customer: Customer
     cards: tuple[Card, ...]
     payments: PaymentHabits
+    favourite_atms: tuple[Merchant, ...]
 
 
 @dataclass(slots=True)
@@ -94,8 +96,10 @@ class Scenario(Protocol):
     def fraud_type(self) -> FraudType:
         """The kind of fraud this scenario injects."""
 
-    def can_target(self, victim: Victim) -> bool:
-        """Whether this customer has what the fraud needs, e.g. a credit card."""
+    def choose_victim(
+        self, rng: random.Random, candidates: Sequence[Victim], start: datetime
+    ) -> Victim | None:
+        """Pick the victim of an episode starting at ``start``, or None if nobody fits."""
 
     def plan(
         self, rng: random.Random, victim: Victim, start: datetime, scenario_id: str

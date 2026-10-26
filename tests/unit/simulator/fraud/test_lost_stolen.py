@@ -232,13 +232,14 @@ def test_the_episode_acts_on_the_theft_call_and_retry_days(
 def test_only_customers_with_a_debit_card_can_be_targeted(
     scenario: LostStolen, victims: list[Victim]
 ) -> None:
+    rng = random.Random(1)
     victim = victims[0]
     no_debit = replace(
         victim, cards=tuple(c for c in victim.cards if c.card_type is not CardType.DEBIT)
     )
 
-    assert scenario.can_target(victim)
-    assert not scenario.can_target(no_debit)
+    assert scenario.choose_victim(rng, [no_debit, victim], START) == victim
+    assert scenario.choose_victim(rng, [no_debit], START) is None
 
 
 def test_needs_foreign_online_merchants(reference_data: ReferenceData) -> None:

@@ -56,9 +56,12 @@ class CardNotPresent:
                 is_foreign = merchant.country_code != HOME_COUNTRY
                 self._online[(merchant.category, is_foreign)].append(merchant)
 
-    def can_target(self, victim: Victim) -> bool:
-        """Every customer has a card whose details can be phished."""
-        return bool(victim.cards)
+    def choose_victim(
+        self, rng: random.Random, candidates: Sequence[Victim], start: datetime
+    ) -> Victim | None:
+        """Anyone with a card, since its details can be phished."""
+        targets = [victim for victim in candidates if victim.cards]
+        return rng.choice(targets) if targets else None
 
     def plan(
         self, rng: random.Random, victim: Victim, start: datetime, scenario_id: str
