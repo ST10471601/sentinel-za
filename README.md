@@ -5,8 +5,6 @@
 An end-to-end data platform that simulates a South African bank's transaction flow, injects
 realistic fraud, and detects it in real time.
 
-> **Status:** Phase 0 (foundations) complete. Phase 1 (simulator) in progress.
-
 ## The problem
 
 South African banks face growing digital fraud: SIM-swap account takeovers, card-not-present
