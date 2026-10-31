@@ -12,7 +12,7 @@ from sentinel.domain.accounts import AccountType, Card, CardEvent, CardEventType
 from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
-from sentinel.domain.devices import CustomerDevice, Device
+from sentinel.domain.devices import CustomerDevice, Device, DeviceLinkMethod, DevicePlatform
 from sentinel.domain.labels import (
     BalanceEnquiryLabel,
     FraudType,
@@ -645,20 +645,49 @@ def test_a_customer_stays_on_one_network_across_sim_swaps(swap_heavy_run: Collec
     assert {n for ns in networks_by_customer.values() for n in ns} == set(NETWORK_SHARES)
 
 
-def test_about_half_of_sim_swaps_are_followed_by_a_new_phone(
+def test_about_half_of_sim_swaps_are_followed_by_a_new_device(
     swap_heavy_run: CollectedRows,
 ) -> None:
     links_by_customer: dict[str, list[datetime]] = defaultdict(list)
     for link in swap_heavy_run.device_links():
         links_by_customer[link.customer_id].append(link.linked_at)
 
-    def has_new_phone(swap: SimSwapEvent) -> bool:
+    def has_new_device(swap: SimSwapEvent) -> bool:
         window_end = swap.swapped_at + timedelta(days=4)
         return any(swap.swapped_at < at < window_end for at in links_by_customer[swap.customer_id])
 
     swaps = swap_heavy_run.sim_swaps()
     # Swaps late in the month lose some new phones to the end of the run.
-    assert 0.3 < sum(has_new_phone(swap) for swap in swaps) / len(swaps) < 0.6
+    assert 0.3 < sum(has_new_device(swap) for swap in swaps) / len(swaps) < 0.6
+
+
+def test_new_browsers_are_linked_by_otp_then_used_to_log_in(
+    reference: ReferenceData, swap_heavy_run: CollectedRows
+) -> None:
+    platform_by_id = {d.device_id: d.platform for d in reference.devices}
+    had_browser = {
+        link.customer_id
+        for link in reference.customer_devices
+        if platform_by_id[link.device_id] is DevicePlatform.WEB
+    }
+    new_browsers = {
+        d.device_id
+        for d in swap_heavy_run.rows[HistoryTable.DEVICE]
+        if isinstance(d, Device) and d.platform is DevicePlatform.WEB
+    }
+    links = [link for link in swap_heavy_run.device_links() if link.device_id in new_browsers]
+    linked_at = {link.device_id: link.linked_at for link in links}
+
+    assert new_browsers
+    for link in links:
+        assert link.link_method is DeviceLinkMethod.OTP
+        assert link.customer_id in had_browser  # only people who already bank in a browser
+    later_logins = [
+        s
+        for s in swap_heavy_run.sessions()
+        if s.device_id in linked_at and s.started_at > linked_at[s.device_id]
+    ]
+    assert later_logins
 
 
 @dataclass(frozen=True, slots=True)

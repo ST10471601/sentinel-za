@@ -1,9 +1,9 @@
 """Legitimate but unusual events, so a model can't treat "different" as "fraud".
 
 Each one looks like part of a fraud pattern: a trip (sudden location change), a big
-purchase (amount spike), a new phone (device change), a new payee paid a large amount
-(the shape of authorised push payment fraud) and a SIM swap, often followed by a new phone
-(the start of an account takeover).
+purchase (amount spike), a new phone or browser (device change), a new payee paid a large
+amount (the shape of authorised push payment fraud) and a SIM swap, often followed by a new
+device (the start of an account takeover).
 """
 
 import random
@@ -13,15 +13,15 @@ from datetime import UTC, date, datetime, time, timedelta
 from sentinel.core.datetimes import SAST, to_sast
 from sentinel.domain.accounts import Card
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent, BeneficiaryEventType
-from sentinel.domain.customers import Customer, CustomerType
-from sentinel.domain.devices import CustomerDevice, Device, DeviceLinkMethod, DevicePlatform
+from sentinel.domain.customers import BankingChannel, Customer, CustomerType
+from sentinel.domain.devices import CustomerDevice, Device, DevicePlatform
 from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.simulator.beneficiaries import OTHER_BANKS
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.card_activity import MerchantIndex, purchase_draft
-from sentinel.simulator.devices import IOS_SHARE
+from sentinel.simulator.devices import IOS_SHARE, LINK_METHOD_BY_PLATFORM
 from sentinel.simulator.drafts import TransactionDraft
 from sentinel.simulator.geography import CITIES, City
 from sentinel.simulator.identifiers import (
@@ -46,6 +46,7 @@ BIG_PURCHASE_RATE = 0.10
 NEW_PHONE_RATE = 0.02  # a new phone every few years
 NEW_PAYEE_RATE = 0.12
 SIM_SWAP_RATE = 0.01  # lost, stolen or broken phones and SIM upgrades
+NEW_BROWSER_RATE = 0.05  # customers who already bank in a browser: new laptop, cleared cookies
 
 TRIP_DAYS = (2, 6)
 BOOKING_DAYS_AHEAD = (3, 21)  # a trip is booked online this long before leaving
@@ -65,11 +66,12 @@ NEW_PAYEE_NAMES: tuple[str, ...] = (
 ADD_PAYEE_DELAY_SECONDS = (30, 300)  # from logging in to saving the payee
 PAY_NEW_PAYEE_DELAY_SECONDS = (30, 600)  # from saving the payee to paying it
 
-# Simulation assumptions for SIM swaps. The rest of the swaps move the new SIM into a phone
-# that is already on the profile.
-SIM_SWAP_NEW_PHONE_SHARE = 0.5
-NEW_PHONE_AFTER_SWAP_DAYS = (0, 3)
-PHONE_SETUP_SECONDS = (10 * 60, 120 * 60)  # from getting the new SIM to registering the phone
+# Simulation assumptions for SIM swaps. Half are followed by a new device, registered with an
+# OTP sent to the new SIM: a browser for customers who bank mainly in one, else a phone. The
+# rest move the new SIM into a phone that is already on the profile.
+SIM_SWAP_NEW_DEVICE_SHARE = 0.5
+NEW_DEVICE_AFTER_SWAP_DAYS = (0, 3)
+DEVICE_SETUP_SECONDS = (10 * 60, 120 * 60)  # from getting the new SIM to registering the device
 STORE_SWAP_SHARE = 0.85  # the rest go through a call centre or an eSIM in the network's app
 STORE_HOURS: tuple[tuple[int, int], ...] = ((8, 18),) * 5 + ((8, 15), (9, 13))  # Monday first
 # Fraud uses the same delay, so the gap before the bank hears of a swap says nothing alone.
@@ -106,6 +108,14 @@ class NewPhone:
 
 
 @dataclass(frozen=True, slots=True)
+class NewBrowser:
+    """The customer links a new browser to their profile for internet banking."""
+
+    day: date
+    not_before: datetime | None = None  # after a SIM swap, the OTP needs the new SIM
+
+
+@dataclass(frozen=True, slots=True)
 class NewPayee:
     """The customer saves a new payee and pays them a large amount straight away."""
 
@@ -124,12 +134,12 @@ class SimSwap:
         return to_sast(self.swapped_at).date()
 
 
-type UnusualEvent = Trip | BigPurchase | NewPhone | NewPayee | SimSwap
+type UnusualEvent = Trip | BigPurchase | NewPhone | NewBrowser | NewPayee | SimSwap
 
 
 @dataclass(frozen=True, slots=True)
-class PhoneChange:
-    """Rows created when a new phone is registered, and the first login on it."""
+class DeviceChange:
+    """Rows created when a device is registered, and the first login on it."""
 
     device: Device
     link: CustomerDevice
@@ -177,19 +187,34 @@ def plan_unusual_events(
     return tuple(events)
 
 
-def plan_sim_swaps(rng: random.Random, first_day: date, day_count: int) -> tuple[UnusualEvent, ...]:
-    """Pick when a customer's SIM is swapped, and whether a new phone is registered after."""
+def plan_sim_swaps(
+    rng: random.Random, customer: Customer, first_day: date, day_count: int
+) -> tuple[UnusualEvent, ...]:
+    """Pick when a customer's SIM is swapped, and whether a new device is registered after."""
     last_day = first_day + timedelta(days=day_count - 1)
+    in_browser = customer.preferred_channel is BankingChannel.INTERNET
     events: list[UnusualEvent] = []
     for _ in range(_count_over_period(rng, SIM_SWAP_RATE, day_count)):
         swap = SimSwap(_pick_swap_time(rng, _random_day(rng, first_day, day_count)))
         events.append(swap)
-        if not chance(rng, SIM_SWAP_NEW_PHONE_SHARE):
+        if not chance(rng, SIM_SWAP_NEW_DEVICE_SHARE):
             continue
-        phone_day = swap.day + timedelta(days=rng.randint(*NEW_PHONE_AFTER_SWAP_DAYS))
-        if phone_day <= last_day:
-            events.append(NewPhone(phone_day, not_before=swap.swapped_at))
+        device_day = swap.day + timedelta(days=rng.randint(*NEW_DEVICE_AFTER_SWAP_DAYS))
+        if device_day > last_day:
+            continue
+        if in_browser:
+            events.append(NewBrowser(device_day, not_before=swap.swapped_at))
+        else:
+            events.append(NewPhone(device_day, not_before=swap.swapped_at))
     return tuple(events)
+
+
+def plan_new_browsers(
+    rng: random.Random, first_day: date, day_count: int
+) -> tuple[UnusualEvent, ...]:
+    """Pick the days a customer who banks in a browser links a new one."""
+    count = _count_over_period(rng, NEW_BROWSER_RATE, day_count)
+    return tuple(NewBrowser(_random_day(rng, first_day, day_count)) for _ in range(count))
 
 
 def trip_on(events: tuple[UnusualEvent, ...], day: date) -> Trip | None:
@@ -237,28 +262,46 @@ def big_purchase_draft(
     return purchase_draft(rng, card, rng.choice(options), amount, event.day, contactless_share)
 
 
-def register_new_phone(
-    rng: random.Random, customer: Customer, event: NewPhone, ids: EventIds
-) -> PhoneChange:
-    """Register a new smartphone and log in on it."""
-    registered_at = pick_event_time(rng, event.day)
-    if event.not_before is not None and registered_at < event.not_before:
-        registered_at = _seconds_after(rng, event.not_before, PHONE_SETUP_SECONDS)
-    is_ios = chance(rng, IOS_SHARE[customer.income_band])
+def register_device(
+    rng: random.Random,
+    ids: EventIds,
+    customer: Customer,
+    platform: DevicePlatform,
+    registered_at: datetime,
+) -> DeviceChange:
+    """Link a device to the customer's profile the way its platform always is, and log in on it."""
     device = Device(
         device_id=ids.devices.next_id(),
         device_fingerprint=make_device_fingerprint(rng),
-        platform=DevicePlatform.IOS if is_ios else DevicePlatform.ANDROID,
+        platform=platform,
         first_seen_at=registered_at,
     )
     link = CustomerDevice(
         customer_id=customer.customer_id,
         device_id=device.device_id,
         linked_at=registered_at,
-        link_method=DeviceLinkMethod.APP_REGISTRATION,
+        link_method=LINK_METHOD_BY_PLATFORM[platform],
     )
     session = start_session(rng, ids.sessions, customer, [device], registered_at)
-    return PhoneChange(device, link, session)
+    return DeviceChange(device, link, session)
+
+
+def register_new_phone(
+    rng: random.Random, customer: Customer, event: NewPhone, ids: EventIds
+) -> DeviceChange:
+    """Register a new smartphone and log in on it."""
+    registered_at = _registration_time(rng, event.day, event.not_before)
+    is_ios = chance(rng, IOS_SHARE[customer.income_band])
+    platform = DevicePlatform.IOS if is_ios else DevicePlatform.ANDROID
+    return register_device(rng, ids, customer, platform, registered_at)
+
+
+def register_new_browser(
+    rng: random.Random, customer: Customer, event: NewBrowser, ids: EventIds
+) -> DeviceChange:
+    """Link a new browser and log in to internet banking on it."""
+    registered_at = _registration_time(rng, event.day, event.not_before)
+    return register_device(rng, ids, customer, DevicePlatform.WEB, registered_at)
 
 
 def notify_sim_swap(
@@ -336,6 +379,14 @@ def _plan_trip(
     if booked_on >= first_day:
         events.append(BigPurchase(booked_on, MerchantCategory.TRAVEL_AGENCY))
     return events
+
+
+def _registration_time(rng: random.Random, day: date, not_before: datetime | None) -> datetime:
+    """A usual time on ``day``, moved after a SIM swap if it would come before it."""
+    registered_at = pick_event_time(rng, day)
+    if not_before is not None and registered_at < not_before:
+        return _seconds_after(rng, not_before, DEVICE_SETUP_SECONDS)
+    return registered_at
 
 
 def _pick_swap_time(rng: random.Random, day: date) -> datetime:

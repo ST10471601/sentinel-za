@@ -7,7 +7,8 @@ import pytest
 from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import Account, Card
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEventType
-from sentinel.domain.customers import Customer, CustomerType
+from sentinel.domain.customers import BankingChannel, Customer, CustomerType
+from sentinel.domain.devices import DeviceLinkMethod, DevicePlatform
 from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.transactions import Channel, TransactionStatus
 from sentinel.simulator.beneficiaries import PayeeHistory
@@ -22,13 +23,14 @@ from sentinel.simulator.sessions import LinkedDevice
 from sentinel.simulator.spending import CATEGORY_AMOUNTS
 from sentinel.simulator.unusual_events import (
     BOOKING_DAYS_AHEAD,
-    NEW_PHONE_AFTER_SWAP_DAYS,
-    PHONE_SETUP_SECONDS,
+    DEVICE_SETUP_SECONDS,
+    NEW_DEVICE_AFTER_SWAP_DAYS,
     SIM_SWAP_NOTICE_SECONDS,
     STORE_HOURS,
     TRIP_DAYS,
     BigPurchase,
     EventIds,
+    NewBrowser,
     NewPayee,
     NewPhone,
     SimSwap,
@@ -38,8 +40,11 @@ from sentinel.simulator.unusual_events import (
     away_customer,
     big_purchase_draft,
     notify_sim_swap,
+    plan_new_browsers,
     plan_sim_swaps,
     plan_unusual_events,
+    register_device,
+    register_new_browser,
     register_new_phone,
     trip_on,
 )
@@ -71,6 +76,14 @@ def individual(reference_data: ReferenceData) -> Customer:
     return next(c for c in reference_data.customers if c.customer_type is CustomerType.INDIVIDUAL)
 
 
+def customer_banking_on(reference_data: ReferenceData, channel: BankingChannel) -> Customer:
+    return next(
+        c
+        for c in reference_data.customers
+        if c.customer_type is CustomerType.INDIVIDUAL and c.preferred_channel is channel
+    )
+
+
 @pytest.fixture(scope="module")
 def plans(reference_data: ReferenceData) -> Plans:
     generator = rng()
@@ -81,9 +94,11 @@ def plans(reference_data: ReferenceData) -> Plans:
 
 
 @pytest.fixture(scope="module")
-def swap_plans() -> list[tuple[UnusualEvent, ...]]:
+def swap_plans(reference_data: ReferenceData) -> list[tuple[UnusualEvent, ...]]:
+    """An app user's swaps, so the new device after a swap is a phone."""
+    app_user = customer_banking_on(reference_data, BankingChannel.APP)
     generator = rng()
-    return [plan_sim_swaps(generator, FIRST_DAY, SIX_MONTHS) for _ in range(20_000)]
+    return [plan_sim_swaps(generator, app_user, FIRST_DAY, SIX_MONTHS) for _ in range(20_000)]
 
 
 def swaps_in(plans: list[tuple[UnusualEvent, ...]]) -> list[SimSwap]:
@@ -316,7 +331,7 @@ def test_a_new_phone_comes_0_to_3_days_after_its_sim_swap(
         for phone in (e for e in events if isinstance(e, NewPhone)):
             assert phone.not_before is not None
             swap = swap_by_time[phone.not_before]
-            low, high = NEW_PHONE_AFTER_SWAP_DAYS
+            low, high = NEW_DEVICE_AFTER_SWAP_DAYS
             assert low <= (phone.day - swap.day).days <= high
             assert phone.day <= FIRST_DAY + timedelta(days=SIX_MONTHS - 1)
 
@@ -356,8 +371,74 @@ def test_a_phone_after_a_sim_swap_is_registered_after_the_swap(individual: Custo
     for _ in range(50):
         late = register_new_phone(generator, individual, NewPhone(day, late_swap), event_ids())
         setup_seconds = (late.link.linked_at - late_swap).total_seconds()
-        assert 0 <= setup_seconds <= PHONE_SETUP_SECONDS[1]
+        assert 0 <= setup_seconds <= DEVICE_SETUP_SECONDS[1]
 
     early = register_new_phone(rng(), individual, NewPhone(day, early_swap), event_ids())
     plain = register_new_phone(rng(), individual, NewPhone(day), event_ids())
     assert early.link.linked_at == plain.link.linked_at  # a later usual time is kept
+
+
+def test_browser_users_link_a_new_browser_after_a_sim_swap(reference_data: ReferenceData) -> None:
+    browser_user = customer_banking_on(reference_data, BankingChannel.INTERNET)
+    generator = rng()
+    events = [
+        event
+        for _ in range(2_000)
+        for event in plan_sim_swaps(generator, browser_user, FIRST_DAY, SIX_MONTHS)
+    ]
+
+    browsers = [e for e in events if isinstance(e, NewBrowser)]
+    assert browsers
+    assert not any(isinstance(e, NewPhone) for e in events)
+    swap_times = {e.swapped_at for e in events if isinstance(e, SimSwap)}
+    assert all(browser.not_before in swap_times for browser in browsers)
+
+
+def test_new_browsers_follow_the_monthly_rate() -> None:
+    generator = rng()
+    plans = [plan_new_browsers(generator, FIRST_DAY, SIX_MONTHS) for _ in range(5_000)]
+    browsers = [event for events in plans for event in events]
+
+    assert len(browsers) / len(plans) / (SIX_MONTHS / 30.44) == pytest.approx(0.05, abs=0.005)
+    last_day = FIRST_DAY + timedelta(days=SIX_MONTHS - 1)
+    for browser in browsers:
+        assert isinstance(browser, NewBrowser)
+        assert FIRST_DAY <= browser.day <= last_day
+        assert browser.not_before is None
+
+
+def test_new_browser_is_linked_by_otp_then_used_for_internet_banking(
+    individual: Customer,
+) -> None:
+    event = NewBrowser(date(2026, 4, 2))
+    change = register_new_browser(rng(), individual, event, event_ids())
+
+    assert change.device.platform is DevicePlatform.WEB
+    assert change.link.link_method is DeviceLinkMethod.OTP
+    assert change.link.linked_at == change.device.first_seen_at == change.session.started_at
+    assert change.session.channel is BankingChannel.INTERNET
+    assert change.session.device_id == change.device.device_id
+    assert (change.session.ip_country, change.session.lat) == (
+        "ZA",
+        None,
+    )  # browsers send no location
+    assert to_sast(change.session.started_at).date() == event.day
+
+
+@pytest.mark.parametrize(
+    ("platform", "link_method"),
+    [
+        (DevicePlatform.ANDROID, DeviceLinkMethod.APP_REGISTRATION),
+        (DevicePlatform.IOS, DeviceLinkMethod.APP_REGISTRATION),
+        (DevicePlatform.WEB, DeviceLinkMethod.OTP),
+    ],
+)
+def test_every_registration_links_a_platform_the_same_way(
+    individual: Customer, platform: DevicePlatform, link_method: DeviceLinkMethod
+) -> None:
+    registered_at = datetime(2026, 4, 2, 9, 0, tzinfo=UTC)
+    change = register_device(rng(), event_ids(), individual, platform, registered_at)
+
+    assert change.device.platform is platform
+    assert change.link.link_method is link_method
+    assert change.session.started_at == registered_at
