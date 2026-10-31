@@ -15,7 +15,7 @@ from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.customers import Customer
-from sentinel.domain.devices import CustomerDevice, Device
+from sentinel.domain.devices import CustomerDevice, Device, DevicePlatform
 from sentinel.domain.labels import (
     BalanceEnquiryLabel,
     LoginSessionLabel,
@@ -83,7 +83,9 @@ from sentinel.simulator.spending import activity_weight, last_pay_date
 from sentinel.simulator.unusual_events import (
     NETWORK_SHARES,
     BigPurchase,
+    DeviceChange,
     EventIds,
+    NewBrowser,
     NewPayee,
     NewPhone,
     SimSwap,
@@ -93,15 +95,17 @@ from sentinel.simulator.unusual_events import (
     away_customer,
     big_purchase_draft,
     notify_sim_swap,
+    plan_new_browsers,
     plan_sim_swaps,
     plan_unusual_events,
+    register_new_browser,
     register_new_phone,
     trip_on,
 )
 
 TRANSACTION_ID_DIGITS = 9
 
-type DayEvent = BigPurchase | NewPhone | NewPayee | SimSwap  # events that happen on a single day
+type DayEvent = BigPurchase | NewPhone | NewBrowser | NewPayee | SimSwap  # on a single day
 
 logger = logging.getLogger(__name__)
 
@@ -289,12 +293,12 @@ class _Simulation:
 
         payees_by_customer = _group(payees.beneficiaries, lambda b: b.customer_id)
         plan_rng = make_rng(reference.seed, "plans")
-        swap_rng = make_rng(reference.seed, "sim-swaps")
+        self._swap_rng = make_rng(reference.seed, "sim-swaps")
+        self._browser_rng = make_rng(reference.seed, "new-browsers")
         day_count = (self._last_day - self._first_day).days + 1
         self._plans = [
             self._plan_customer(
                 plan_rng,
-                swap_rng,
                 customer,
                 accounts[customer.customer_id],
                 cards[customer.customer_id],
@@ -378,7 +382,6 @@ class _Simulation:
     def _plan_customer(
         self,
         rng: random.Random,
-        swap_rng: random.Random,
         customer: Customer,
         accounts: list[Account],
         cards: list[Card],
@@ -387,9 +390,11 @@ class _Simulation:
         day_count: int,
     ) -> _CustomerPlan:
         recurring = plan_recurring(rng, customer, find_main_account(accounts))
-        network = pick(swap_rng, NETWORK_SHARES)
+        network = pick(self._swap_rng, NETWORK_SHARES)
         events = plan_unusual_events(rng, customer, self._first_day, day_count)
-        events += plan_sim_swaps(swap_rng, self._first_day, day_count)
+        events += plan_sim_swaps(self._swap_rng, customer, self._first_day, day_count)
+        if any(item.device.platform is DevicePlatform.WEB for item in devices):
+            events += plan_new_browsers(self._browser_rng, self._first_day, day_count)
         events_by_day: dict[date, list[DayEvent]] = defaultdict(list)
         for event in events:
             if not isinstance(event, Trip):
@@ -493,7 +498,11 @@ class _Simulation:
 
         for event in plan.events_by_day.get(day, []):
             if isinstance(event, NewPhone):
-                self._new_phone(plan, customer, event, output)
+                change = register_new_phone(self._rng, customer, event, self._event_ids)
+                self._add_device(plan, change, output)
+            elif isinstance(event, NewBrowser):
+                change = register_new_browser(self._rng, customer, event, self._event_ids)
+                self._add_device(plan, change, output)
             elif isinstance(event, SimSwap):
                 swap = notify_sim_swap(
                     self._rng, self._event_ids.sim_swaps, customer, plan.network, event.swapped_at
@@ -510,10 +519,8 @@ class _Simulation:
                 self._new_payee(plan, customer, event, budget, output)
         return customer
 
-    def _new_phone(
-        self, plan: _CustomerPlan, customer: Customer, event: NewPhone, output: _DayOutput
-    ) -> None:
-        change = register_new_phone(self._rng, customer, event, self._event_ids)
+    def _add_device(self, plan: _CustomerPlan, change: DeviceChange, output: _DayOutput) -> None:
+        """The new device is on the profile from now on, so later logins can use it."""
         linked = LinkedDevice(change.device, change.link.linked_at)
         plan.payments = replace(plan.payments, devices=(*plan.payments.devices, linked))
         output.devices.append(change.device)

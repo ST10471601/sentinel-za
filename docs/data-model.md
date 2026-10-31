@@ -296,6 +296,10 @@ same account follows 2 to 7 days later.
 
 A device can be linked to more than one customer. A single fraudster device linked to many victims is a strong signal.
 
+During the run customers register new phones (`app_registration`) and link new browsers (`otp`).
+Every registration links a platform the same way, fraudster or not, so the link method alone
+says nothing.
+
 | Column | Type | PII | Description |
 |---|---|---|---|
 | device_id | string | | PK. `DEV-0000001` |
@@ -315,8 +319,8 @@ A device can be linked to more than one customer. A single fraudster device link
 ### sim_swap_event
 
 The simulator swaps about 1% of customers' SIMs a month, mostly in network store hours. About half
-are followed by a new phone registered within 3 days, which looks like the start of a takeover.
-A customer stays on one network.
+are followed by a new device registered within 3 days (a browser for customers who bank mainly in
+one, else a phone), which looks like the start of a takeover. A customer stays on one network.
 
 | Column | Type | PII | Description |
 |---|---|---|---|
