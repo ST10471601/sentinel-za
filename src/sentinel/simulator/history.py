@@ -16,8 +16,14 @@ from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.customers import Customer
 from sentinel.domain.devices import CustomerDevice, Device
-from sentinel.domain.labels import BalanceEnquiryLabel, ScenarioInstance, TransactionLabel
-from sentinel.domain.merchants import MerchantCategory
+from sentinel.domain.labels import (
+    BalanceEnquiryLabel,
+    LoginSessionLabel,
+    ScenarioInstance,
+    SimSwapLabel,
+    TransactionLabel,
+)
+from sentinel.domain.merchants import Merchant, MerchantCategory
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
@@ -38,11 +44,19 @@ from sentinel.simulator.drafts import (
 )
 from sentinel.simulator.fraud.card_not_present import CardNotPresent
 from sentinel.simulator.fraud.counterfeit import Counterfeit
-from sentinel.simulator.fraud.episodes import Episode, FraudAction, Scenario, Victim
+from sentinel.simulator.fraud.episodes import (
+    Episode,
+    FraudAction,
+    FraudActions,
+    Scenario,
+    Victim,
+)
 from sentinel.simulator.fraud.ground_truth import (
     GroundTruth,
     normal_enquiry_label,
     normal_labels,
+    normal_session_labels,
+    normal_sim_swap_labels,
 )
 from sentinel.simulator.fraud.lost_stolen import LostStolen
 from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
@@ -108,6 +122,8 @@ class HistoryTable(StrEnum):
     SCENARIO_INSTANCE = "scenario_instance"
     TRANSACTION_LABEL = "transaction_label"
     BALANCE_ENQUIRY_LABEL = "balance_enquiry_label"
+    LOGIN_SESSION_LABEL = "login_session_label"
+    SIM_SWAP_LABEL = "sim_swap_label"
 
 
 MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
@@ -124,6 +140,8 @@ MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
     HistoryTable.SCENARIO_INSTANCE: ScenarioInstance,
     HistoryTable.TRANSACTION_LABEL: TransactionLabel,
     HistoryTable.BALANCE_ENQUIRY_LABEL: BalanceEnquiryLabel,
+    HistoryTable.LOGIN_SESSION_LABEL: LoginSessionLabel,
+    HistoryTable.SIM_SWAP_LABEL: SimSwapLabel,
 }
 
 # Ground truth: kept apart from what the bank observes, so models can't train on it by accident.
@@ -132,6 +150,8 @@ TRUTH_TABLES = frozenset(
         HistoryTable.SCENARIO_INSTANCE,
         HistoryTable.TRANSACTION_LABEL,
         HistoryTable.BALANCE_ENQUIRY_LABEL,
+        HistoryTable.LOGIN_SESSION_LABEL,
+        HistoryTable.SIM_SWAP_LABEL,
     }
 )
 
@@ -203,6 +223,11 @@ class _DayOutput:
     sim_swaps: list[SimSwapEvent] = field(default_factory=list)
 
 
+def fraud_scenarios(merchants: Sequence[Merchant], ids: EventIds) -> list[Scenario]:
+    """Every scenario the run injects. Those that add logins, devices or payees use ``ids``."""
+    return [CardNotPresent(merchants), LostStolen(merchants), Counterfeit(merchants)]
+
+
 def simulate_history(
     reference: ReferenceData,
     months: int,
@@ -248,6 +273,7 @@ class _Simulation:
             reference.simulation_start,
         )
         self._emit(HistoryTable.LOGIN_SESSION, payees.sessions)
+        self._emit(HistoryTable.LOGIN_SESSION_LABEL, normal_session_labels(payees.sessions))
         self._emit(HistoryTable.BENEFICIARY, payees.beneficiaries)
         self._emit(HistoryTable.BENEFICIARY_EVENT, payees.events)
 
@@ -299,6 +325,8 @@ class _Simulation:
         self._emit(HistoryTable.SCENARIO_INSTANCE, truth.scenarios)
         self._emit(HistoryTable.TRANSACTION_LABEL, truth.transaction_labels)
         self._emit(HistoryTable.BALANCE_ENQUIRY_LABEL, truth.enquiry_labels)
+        self._emit(HistoryTable.LOGIN_SESSION_LABEL, truth.session_labels)
+        self._emit(HistoryTable.SIM_SWAP_LABEL, truth.sim_swap_labels)
 
         logger.info("simulated history", extra={t.value: n for t, n in self._counts.items()})
         return HistorySummary(
@@ -313,11 +341,7 @@ class _Simulation:
         self, reference: ReferenceData, months: int, fraud: FraudSettings
     ) -> _FraudPlan:
         """Pick fraud episodes, victims and report times up front, as unusual events are."""
-        scenarios: list[Scenario] = [
-            CardNotPresent(reference.merchants),
-            LostStolen(reference.merchants),
-            Counterfeit(reference.merchants),
-        ]
+        scenarios = fraud_scenarios(reference.merchants, self._event_ids)
         victims = [
             Victim(
                 plan.customer,
@@ -393,16 +417,30 @@ class _Simulation:
             actions = episode.act(day, self._ledger)
             output.planned += actions.genuine
             output.planned += [_FraudAttempt(episode.scenario_id, a) for a in actions.attempts]
+            self._emit_identity_events(episode.scenario_id, actions)
 
         self._emit(HistoryTable.LOGIN_SESSION, output.sessions)
+        self._emit(HistoryTable.LOGIN_SESSION_LABEL, normal_session_labels(output.sessions))
         self._emit(HistoryTable.DEVICE, output.devices)
         self._emit(HistoryTable.CUSTOMER_DEVICE, output.device_links)
         self._emit(HistoryTable.SIM_SWAP_EVENT, output.sim_swaps)
+        self._emit(HistoryTable.SIM_SWAP_LABEL, normal_sim_swap_labels(output.sim_swaps))
         self._emit(HistoryTable.BENEFICIARY, output.beneficiaries)
         self._emit(HistoryTable.BENEFICIARY_EVENT, output.beneficiary_events)
         transactions, normal = self._settle(output.planned)
         self._emit(HistoryTable.TRANSACTION, transactions)
         self._emit(HistoryTable.TRANSACTION_LABEL, normal_labels(normal))
+
+    def _emit_identity_events(self, scenario_id: str, actions: FraudActions) -> None:
+        """Write the fraudster's SIM swaps, devices, logins and payees, and note them as fraud."""
+        self._emit(HistoryTable.SIM_SWAP_EVENT, actions.sim_swaps)
+        self._emit(HistoryTable.DEVICE, actions.devices)
+        self._emit(HistoryTable.CUSTOMER_DEVICE, actions.device_links)
+        self._emit(HistoryTable.LOGIN_SESSION, actions.sessions)
+        self._emit(HistoryTable.BENEFICIARY, actions.beneficiaries)
+        self._emit(HistoryTable.BENEFICIARY_EVENT, actions.beneficiary_events)
+        self._fraud.ground_truth.record_sim_swaps(scenario_id, actions.sim_swaps)
+        self._fraud.ground_truth.record_sessions(scenario_id, actions.sessions)
 
     def _issue_replacements(self, day: date) -> None:
         """Hand out new cards due today; their owners switch to them straight away."""

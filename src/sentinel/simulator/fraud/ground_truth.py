@@ -1,4 +1,4 @@
-"""Ground truth: a label for every transaction and enquiry, and a summary of every episode."""
+"""Ground truth: labels for transactions, enquiries, logins and SIM swaps, and episode summaries."""
 
 import json
 from collections.abc import Iterable
@@ -6,7 +6,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from sentinel.domain.balance_enquiries import BalanceEnquiry
-from sentinel.domain.labels import BalanceEnquiryLabel, ScenarioInstance, TransactionLabel
+from sentinel.domain.labels import (
+    BalanceEnquiryLabel,
+    LoginSessionLabel,
+    ScenarioInstance,
+    SimSwapLabel,
+    TransactionLabel,
+)
+from sentinel.domain.sessions import LoginSession
+from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
 from sentinel.simulator.fraud.episodes import Episode
 
@@ -17,6 +25,12 @@ class _Outcome:
     reported_at: datetime | None
     transactions: list[Transaction] = field(default_factory=list)
     enquiries: list[BalanceEnquiry] = field(default_factory=list)
+    sessions: list[LoginSession] = field(default_factory=list)
+    sim_swaps: list[SimSwapEvent] = field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        """True if the fraudster did nothing, e.g. the episode starts after the run ends."""
+        return not (self.transactions or self.enquiries or self.sessions or self.sim_swaps)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +40,8 @@ class TruthRows:
     scenarios: list[ScenarioInstance]
     transaction_labels: list[TransactionLabel]
     enquiry_labels: list[BalanceEnquiryLabel]
+    session_labels: list[LoginSessionLabel]
+    sim_swap_labels: list[SimSwapLabel]
 
 
 class GroundTruth:
@@ -46,35 +62,23 @@ class GroundTruth:
         """Note a balance check the fraudster made."""
         self._outcomes[scenario_id].enquiries.append(enquiry)
 
+    def record_sessions(self, scenario_id: str, sessions: Iterable[LoginSession]) -> None:
+        """Note logins the fraudster made on the victim's profile."""
+        self._outcomes[scenario_id].sessions.extend(sessions)
+
+    def record_sim_swaps(self, scenario_id: str, sim_swaps: Iterable[SimSwapEvent]) -> None:
+        """Note SIM swaps the fraudster had done on the victim's number."""
+        self._outcomes[scenario_id].sim_swaps.extend(sim_swaps)
+
     def finish(self) -> TruthRows:
         """Summarise every episode that happened and label what its fraudster did."""
-        rows = TruthRows([], [], [])
+        rows = TruthRows([], [], [], [], [])
         for outcome in self._outcomes.values():
-            if not outcome.transactions and not outcome.enquiries:
-                continue  # planned to start after the run ended
+            if outcome.is_empty():
+                continue
             instance = _summarise(outcome)
-            fraud_type, scenario_id = instance.fraud_type, instance.scenario_id
             rows.scenarios.append(instance)
-            rows.transaction_labels.extend(
-                TransactionLabel(
-                    transaction_id=transaction.transaction_id,
-                    is_fraud=True,
-                    fraud_type=fraud_type,
-                    scenario_id=scenario_id,
-                    reported_at=outcome.reported_at,
-                )
-                for transaction in outcome.transactions
-            )
-            rows.enquiry_labels.extend(
-                BalanceEnquiryLabel(
-                    balance_enquiry_id=enquiry.balance_enquiry_id,
-                    is_fraud=True,
-                    fraud_type=fraud_type,
-                    scenario_id=scenario_id,
-                    reported_at=outcome.reported_at,
-                )
-                for enquiry in outcome.enquiries
-            )
+            _label_fraud(outcome, instance, rows)
         return rows
 
 
@@ -92,6 +96,34 @@ def normal_labels(transactions: Iterable[Transaction]) -> list[TransactionLabel]
     ]
 
 
+def normal_session_labels(sessions: Iterable[LoginSession]) -> list[LoginSessionLabel]:
+    """Labels for logins the customer made."""
+    return [
+        LoginSessionLabel(
+            session_id=session.session_id,
+            is_fraud=False,
+            fraud_type=None,
+            scenario_id=None,
+            reported_at=None,
+        )
+        for session in sessions
+    ]
+
+
+def normal_sim_swap_labels(sim_swaps: Iterable[SimSwapEvent]) -> list[SimSwapLabel]:
+    """Labels for SIM swaps the customer asked for."""
+    return [
+        SimSwapLabel(
+            sim_swap_id=swap.sim_swap_id,
+            is_fraud=False,
+            fraud_type=None,
+            scenario_id=None,
+            reported_at=None,
+        )
+        for swap in sim_swaps
+    ]
+
+
 def normal_enquiry_label(enquiry: BalanceEnquiry) -> BalanceEnquiryLabel:
     """The label for a balance check the cardholder made."""
     return BalanceEnquiryLabel(
@@ -103,10 +135,57 @@ def normal_enquiry_label(enquiry: BalanceEnquiry) -> BalanceEnquiryLabel:
     )
 
 
+def _label_fraud(outcome: _Outcome, instance: ScenarioInstance, rows: TruthRows) -> None:
+    """Label everything the episode's fraudster did. One report covers the whole episode."""
+    fraud_type, scenario_id = instance.fraud_type, instance.scenario_id
+    reported_at = outcome.reported_at
+    rows.transaction_labels.extend(
+        TransactionLabel(
+            transaction_id=transaction.transaction_id,
+            is_fraud=True,
+            fraud_type=fraud_type,
+            scenario_id=scenario_id,
+            reported_at=reported_at,
+        )
+        for transaction in outcome.transactions
+    )
+    rows.enquiry_labels.extend(
+        BalanceEnquiryLabel(
+            balance_enquiry_id=enquiry.balance_enquiry_id,
+            is_fraud=True,
+            fraud_type=fraud_type,
+            scenario_id=scenario_id,
+            reported_at=reported_at,
+        )
+        for enquiry in outcome.enquiries
+    )
+    rows.session_labels.extend(
+        LoginSessionLabel(
+            session_id=session.session_id,
+            is_fraud=True,
+            fraud_type=fraud_type,
+            scenario_id=scenario_id,
+            reported_at=reported_at,
+        )
+        for session in outcome.sessions
+    )
+    rows.sim_swap_labels.extend(
+        SimSwapLabel(
+            sim_swap_id=swap.sim_swap_id,
+            is_fraud=True,
+            fraud_type=fraud_type,
+            scenario_id=scenario_id,
+            reported_at=reported_at,
+        )
+        for swap in outcome.sim_swaps
+    )
+
+
 def _summarise(outcome: _Outcome) -> ScenarioInstance:
     episode, transactions = outcome.episode, outcome.transactions
-    # A fraudster's balance check can come before the first transaction.
+    # A balance check, login or SIM swap can come before the first transaction.
     times = [t.event_time for t in transactions] + [e.event_time for e in outcome.enquiries]
+    times += [s.started_at for s in outcome.sessions] + [s.swapped_at for s in outcome.sim_swaps]
     # Only money that left an account counts as stolen; a transfer's credit leg is the same money.
     stolen = sum(
         t.amount_cents

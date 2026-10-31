@@ -1,7 +1,9 @@
 import json
+import random
 from collections import Counter, defaultdict
-from collections.abc import Sequence
-from datetime import datetime, timedelta
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -9,14 +11,17 @@ from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import AccountType, Card, CardEvent, CardEventType
 from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.base import DomainModel
-from sentinel.domain.beneficiaries import Beneficiary
+from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.devices import CustomerDevice, Device
 from sentinel.domain.labels import (
     BalanceEnquiryLabel,
     FraudType,
+    LoginSessionLabel,
     ScenarioInstance,
+    SimSwapLabel,
     TransactionLabel,
 )
+from sentinel.domain.merchants import Merchant
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.domain.transactions import (
@@ -27,12 +32,28 @@ from sentinel.domain.transactions import (
     Transaction,
     TransactionStatus,
 )
-from sentinel.simulator import unusual_events
+from sentinel.simulator import history, unusual_events
+from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.card_replacement import REPLACEMENT_DAYS
+from sentinel.simulator.fraud.episodes import (
+    Balances,
+    FraudActions,
+    ParamValue,
+    Scenario,
+    Victim,
+)
 from sentinel.simulator.fraud.planning import FRAUD_MIX, FraudSettings
 from sentinel.simulator.history import HistorySummary, HistoryTable, simulate_history
 from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
-from sentinel.simulator.unusual_events import NETWORK_SHARES
+from sentinel.simulator.unusual_events import (
+    NETWORK_SHARES,
+    EventIds,
+    NewPayee,
+    NewPhone,
+    add_and_pay_new_payee,
+    notify_sim_swap,
+    register_new_phone,
+)
 
 SEED = 21
 CUSTOMERS = 150
@@ -88,6 +109,22 @@ class CollectedRows:
         rows = self.rows[HistoryTable.CUSTOMER_DEVICE]
         return [row for row in rows if isinstance(row, CustomerDevice)]
 
+    def sessions(self) -> list[LoginSession]:
+        rows = self.rows[HistoryTable.LOGIN_SESSION]
+        return [row for row in rows if isinstance(row, LoginSession)]
+
+    def session_labels(self) -> list[LoginSessionLabel]:
+        rows = self.rows[HistoryTable.LOGIN_SESSION_LABEL]
+        return [row for row in rows if isinstance(row, LoginSessionLabel)]
+
+    def sim_swap_labels(self) -> list[SimSwapLabel]:
+        rows = self.rows[HistoryTable.SIM_SWAP_LABEL]
+        return [row for row in rows if isinstance(row, SimSwapLabel)]
+
+    def beneficiary_events(self) -> list[BeneficiaryEvent]:
+        rows = self.rows[HistoryTable.BENEFICIARY_EVENT]
+        return [row for row in rows if isinstance(row, BeneficiaryEvent)]
+
 
 @pytest.fixture(scope="module")
 def reference() -> ReferenceData:
@@ -114,6 +151,8 @@ def test_every_table_gets_rows_and_the_summary_counts_them(
         HistoryTable.LOGIN_SESSION,
         HistoryTable.BENEFICIARY,
         HistoryTable.SIM_SWAP_EVENT,
+        HistoryTable.LOGIN_SESSION_LABEL,
+        HistoryTable.SIM_SWAP_LABEL,
     )
     for table in tables:
         assert sink.rows[table]
@@ -620,3 +659,142 @@ def test_about_half_of_sim_swaps_are_followed_by_a_new_phone(
     swaps = swap_heavy_run.sim_swaps()
     # Swaps late in the month lose some new phones to the end of the run.
     assert 0.3 < sum(has_new_phone(swap) for swap in swaps) / len(swaps) < 0.6
+
+
+@dataclass(frozen=True, slots=True)
+class FakeTakeover:
+    """Swaps the victim's SIM, registers a new phone, then saves a payee and pays it."""
+
+    scenario_id: str
+    victim: Victim
+    start: datetime
+    ids: EventIds
+    fraud_type: FraudType = FraudType.SIM_SWAP_TAKEOVER
+    card_id: None = None
+    card_loss: None = None
+
+    @property
+    def victim_customer_id(self) -> str:
+        return self.victim.customer.customer_id
+
+    @property
+    def params(self) -> Mapping[str, ParamValue]:
+        return {}
+
+    def days(self) -> frozenset[date]:
+        return frozenset({to_sast(self.start).date()})
+
+    def planned_end(self) -> datetime:
+        return self.start
+
+    def act(self, day: date, balances: Balances) -> FraudActions:
+        rng = random.Random(self.scenario_id)
+        customer, habits = self.victim.customer, self.victim.payments
+        swap = notify_sim_swap(rng, self.ids.sim_swaps, customer, "MNO-1", self.start)
+        phone = register_new_phone(rng, customer, NewPhone(day, not_before=self.start), self.ids)
+        budget = DayBudget(rng, {habits.main_account.account_id: 10**12})  # the ledger decides
+        payee = add_and_pay_new_payee(rng, customer, NewPayee(day), habits, self.ids, budget)
+        assert payee is not None
+        return FraudActions(
+            attempts=[payee.payment],
+            sim_swaps=[swap],
+            devices=[phone.device],
+            device_links=[phone.link],
+            sessions=[phone.session, payee.session],
+            beneficiaries=[payee.beneficiary],
+            beneficiary_events=[payee.event],
+        )
+
+
+class FakeTakeoverScenario:
+    """Plans fake takeovers against anyone, with the run's shared ID sequences."""
+
+    fraud_type = FraudType.SIM_SWAP_TAKEOVER
+
+    def __init__(self, ids: EventIds) -> None:
+        self._ids = ids
+
+    def choose_victim(
+        self, rng: random.Random, candidates: Sequence[Victim], start: datetime
+    ) -> Victim | None:
+        return rng.choice(candidates)
+
+    def plan(
+        self, rng: random.Random, victim: Victim, start: datetime, scenario_id: str
+    ) -> FakeTakeover:
+        return FakeTakeover(scenario_id, victim, start, self._ids)
+
+
+def fake_scenarios(merchants: Sequence[Merchant], ids: EventIds) -> list[Scenario]:
+    return [FakeTakeoverScenario(ids)]
+
+
+@pytest.fixture(scope="module")
+def takeover_run(reference: ReferenceData) -> CollectedRows:
+    """Only fake takeovers, all reported, so every identity table also gets fraud rows."""
+    sink = CollectedRows()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(history, "fraud_scenarios", fake_scenarios)
+        simulate_history(reference, MONTHS, sink, FraudSettings(100.0, unreported_share=0.0))
+    return sink
+
+
+def test_every_login_and_sim_swap_has_exactly_one_label(takeover_run: CollectedRows) -> None:
+    session_ids = [s.session_id for s in takeover_run.sessions()]
+    swap_ids = [s.sim_swap_id for s in takeover_run.sim_swaps()]
+
+    assert len(set(session_ids)) == len(session_ids)
+    assert len(set(swap_ids)) == len(swap_ids)
+    assert sorted(label.session_id for label in takeover_run.session_labels()) == sorted(
+        session_ids
+    )
+    assert sorted(label.sim_swap_id for label in takeover_run.sim_swap_labels()) == sorted(swap_ids)
+
+
+def test_a_fraudsters_logins_and_sim_swaps_are_labelled_with_the_episode(
+    takeover_run: CollectedRows,
+) -> None:
+    scenario_ids = {s.scenario_id for s in takeover_run.scenarios()}
+    fraud_sessions = [label for label in takeover_run.session_labels() if label.is_fraud]
+    fraud_swaps = [label for label in takeover_run.sim_swap_labels() if label.is_fraud]
+    labels: list[LoginSessionLabel | SimSwapLabel] = [*fraud_sessions, *fraud_swaps]
+
+    assert scenario_ids
+    assert Counter(label.scenario_id for label in fraud_sessions) == dict.fromkeys(scenario_ids, 2)
+    assert Counter(label.scenario_id for label in fraud_swaps) == dict.fromkeys(scenario_ids, 1)
+    for label in labels:
+        assert label.fraud_type is FraudType.SIM_SWAP_TAKEOVER
+        assert label.reported_at is not None
+
+
+def test_a_fraudsters_device_and_payee_join_back_to_a_fraud_session(
+    takeover_run: CollectedRows,
+) -> None:
+    victim_by_scenario = {s.scenario_id: s.victim_customer_id for s in takeover_run.scenarios()}
+    scenario_by_session = {
+        label.session_id: label.scenario_id
+        for label in takeover_run.session_labels()
+        if label.scenario_id is not None
+    }
+    new_devices = {
+        d.device_id for d in takeover_run.rows[HistoryTable.DEVICE] if isinstance(d, Device)
+    }
+    links = {(link.customer_id, link.device_id) for link in takeover_run.device_links()}
+
+    registrations = [
+        s
+        for s in takeover_run.sessions()
+        if s.session_id in scenario_by_session and s.device_id in new_devices
+    ]
+    assert len(registrations) == len(victim_by_scenario)
+    for session in registrations:
+        victim = victim_by_scenario[scenario_by_session[session.session_id]]
+        assert (victim, session.device_id) in links
+
+    payee_events = [
+        e for e in takeover_run.beneficiary_events() if e.session_id in scenario_by_session
+    ]
+    fraud_ids = {label.transaction_id for label in takeover_run.labels() if label.is_fraud}
+    paid = {t.beneficiary_id for t in takeover_run.transactions() if t.transaction_id in fraud_ids}
+    assert len(payee_events) == len(victim_by_scenario)
+    assert paid == {e.beneficiary_id for e in payee_events}

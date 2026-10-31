@@ -7,7 +7,9 @@ from sentinel.domain.labels import (
     AccountLabel,
     BalanceEnquiryLabel,
     FraudType,
+    LoginSessionLabel,
     ScenarioInstance,
+    SimSwapLabel,
     TransactionLabel,
 )
 
@@ -101,6 +103,29 @@ def test_balance_check_labels_follow_the_same_rules() -> None:
     assert BalanceEnquiryLabel.model_validate(fields).is_fraud
     with pytest.raises(ValidationError, match="need fraud_type and scenario_id"):
         BalanceEnquiryLabel.model_validate(fields | {"scenario_id": None})
+
+
+@pytest.mark.parametrize(
+    ("model", "id_field", "row_id"),
+    [
+        (LoginSessionLabel, "session_id", "SES-0000001"),
+        (SimSwapLabel, "sim_swap_id", "SIM-0000001"),
+    ],
+)
+def test_session_and_sim_swap_labels_follow_the_same_rules(
+    model: type[LoginSessionLabel | SimSwapLabel], id_field: str, row_id: str
+) -> None:
+    fields = label_fields()
+    fields[id_field] = row_id
+    del fields["transaction_id"]
+    normal = fields | {"is_fraud": False, "fraud_type": None, "scenario_id": None}
+
+    assert model.model_validate(fields).is_fraud
+    with pytest.raises(ValidationError, match="need fraud_type and scenario_id"):
+        model.model_validate(fields | {"scenario_id": None})
+    with pytest.raises(ValidationError, match="normal labels have no"):
+        model.model_validate(normal)  # still has reported_at
+    assert not model.model_validate(normal | {"reported_at": None}).is_fraud
 
 
 def test_mule_since_is_set_only_for_mules() -> None:
