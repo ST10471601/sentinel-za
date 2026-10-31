@@ -15,7 +15,7 @@ from sentinel.domain.labels import (
 )
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.sim_swaps import SimSwapEvent
-from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
+from sentinel.domain.transactions import Channel, Direction, Transaction, TransactionStatus
 from sentinel.simulator.fraud.episodes import Episode
 
 
@@ -186,11 +186,14 @@ def _summarise(outcome: _Outcome) -> ScenarioInstance:
     # A balance check, login or SIM swap can come before the first transaction.
     times = [t.event_time for t in transactions] + [e.event_time for e in outcome.enquiries]
     times += [s.started_at for s in outcome.sessions] + [s.swapped_at for s in outcome.sim_swaps]
-    # Only money that left an account counts as stolen; a transfer's credit leg is the same money.
+    # Only money that left the victim's accounts counts as stolen. A sweep between the victim's
+    # own accounts would otherwise count the same money on the way in and again on the way out.
     stolen = sum(
         t.amount_cents
         for t in transactions
-        if t.direction is Direction.DEBIT and t.status is TransactionStatus.APPROVED
+        if t.direction is Direction.DEBIT
+        and t.status is TransactionStatus.APPROVED
+        and t.channel is not Channel.INTERNAL_TRANSFER
     )
     return ScenarioInstance(
         scenario_id=episode.scenario_id,

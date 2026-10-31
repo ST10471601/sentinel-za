@@ -42,6 +42,7 @@ from sentinel.simulator.drafts import (
     to_balance_enquiry,
     to_transaction,
 )
+from sentinel.simulator.fraud.account_takeover import AccountTakeover
 from sentinel.simulator.fraud.card_not_present import CardNotPresent
 from sentinel.simulator.fraud.counterfeit import Counterfeit
 from sentinel.simulator.fraud.episodes import (
@@ -227,9 +228,16 @@ class _DayOutput:
     sim_swaps: list[SimSwapEvent] = field(default_factory=list)
 
 
-def fraud_scenarios(merchants: Sequence[Merchant], ids: EventIds) -> list[Scenario]:
-    """Every scenario the run injects. Those that add logins, devices or payees use ``ids``."""
-    return [CardNotPresent(merchants), LostStolen(merchants), Counterfeit(merchants)]
+def fraud_scenarios(
+    merchants: Sequence[Merchant], ids: EventIds, transfer_groups: IdSequence
+) -> list[Scenario]:
+    """Every scenario the run injects. Those that add rows continue the run's ID sequences."""
+    return [
+        CardNotPresent(merchants),
+        LostStolen(merchants),
+        Counterfeit(merchants),
+        AccountTakeover(ids, transfer_groups),
+    ]
 
 
 def simulate_history(
@@ -345,13 +353,16 @@ class _Simulation:
         self, reference: ReferenceData, months: int, fraud: FraudSettings
     ) -> _FraudPlan:
         """Pick fraud episodes, victims and report times up front, as unusual events are."""
-        scenarios = fraud_scenarios(reference.merchants, self._event_ids)
+        scenarios = fraud_scenarios(
+            reference.merchants, self._event_ids, self._payment_ids.transfer_groups
+        )
         victims = [
             Victim(
                 plan.customer,
                 plan.cards,
                 plan.payments,
                 plan.card_habits.favourites[MerchantCategory.ATM],
+                plan.network,
             )
             for plan in self._plans
         ]

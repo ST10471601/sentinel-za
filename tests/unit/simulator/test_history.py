@@ -44,6 +44,7 @@ from sentinel.simulator.fraud.episodes import (
 )
 from sentinel.simulator.fraud.planning import FRAUD_MIX, FraudSettings
 from sentinel.simulator.history import HistorySummary, HistoryTable, simulate_history
+from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
 from sentinel.simulator.unusual_events import (
     NETWORK_SHARES,
@@ -62,6 +63,7 @@ INJECTED_FRAUD_TYPES = {
     FraudType.CARD_NOT_PRESENT,
     FraudType.CARD_PRESENT_LOST_STOLEN,
     FraudType.CARD_PRESENT_COUNTERFEIT,
+    FraudType.SIM_SWAP_TAKEOVER,
 }
 CARD_AND_PIN_FRAUD_TYPES = {FraudType.CARD_PRESENT_LOST_STOLEN, FraudType.CARD_PRESENT_COUNTERFEIT}
 BLOCK_EVENTS = {CardEventType.BLOCKED, CardEventType.REPORTED_LOST}
@@ -303,7 +305,11 @@ def test_fraud_labels_match_their_episodes(
         assert label.fraud_type is scenario.fraud_type
         assert scenario.fraud_type in INJECTED_FRAUD_TYPES
         assert scenario.started_at <= transaction.event_time <= scenario.ended_at
-        if transaction.status is TransactionStatus.APPROVED:
+        if (
+            transaction.status is TransactionStatus.APPROVED
+            and transaction.direction is Direction.DEBIT
+            and transaction.channel is not Channel.INTERNAL_TRANSFER
+        ):
             stolen[label.scenario_id] += transaction.amount_cents
 
     for scenario_id, scenario in scenarios.items():
@@ -754,7 +760,9 @@ class FakeTakeoverScenario:
         return FakeTakeover(scenario_id, victim, start, self._ids)
 
 
-def fake_scenarios(merchants: Sequence[Merchant], ids: EventIds) -> list[Scenario]:
+def fake_scenarios(
+    merchants: Sequence[Merchant], ids: EventIds, transfer_groups: IdSequence
+) -> list[Scenario]:
     return [FakeTakeoverScenario(ids)]
 
 
@@ -827,3 +835,107 @@ def test_a_fraudsters_device_and_payee_join_back_to_a_fraud_session(
     paid = {t.beneficiary_id for t in takeover_run.transactions() if t.transaction_id in fraud_ids}
     assert len(payee_events) == len(victim_by_scenario)
     assert paid == {e.beneficiary_id for e in payee_events}
+
+
+@pytest.fixture(scope="module")
+def real_takeover_run(reference: ReferenceData) -> CollectedRows:
+    """Mostly real SIM swap takeovers, all reported."""
+    sink = CollectedRows()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(FRAUD_MIX, FraudType.SIM_SWAP_TAKEOVER, 2.0)
+        simulate_history(reference, MONTHS, sink, FraudSettings(300.0, unreported_share=0.0))
+    return sink
+
+
+def takeovers(rows: CollectedRows) -> dict[str, ScenarioInstance]:
+    return {
+        s.scenario_id: s for s in rows.scenarios() if s.fraud_type is FraudType.SIM_SWAP_TAKEOVER
+    }
+
+
+def test_each_takeover_swaps_the_victims_sim_once_before_logging_in(
+    real_takeover_run: CollectedRows,
+) -> None:
+    episodes = takeovers(real_takeover_run)
+    swaps = {s.sim_swap_id: s for s in real_takeover_run.sim_swaps()}
+    sessions = {s.session_id: s for s in real_takeover_run.sessions()}
+    first_login: dict[str, datetime] = {}
+    for label in real_takeover_run.session_labels():
+        if label.scenario_id in episodes:
+            started_at = sessions[label.session_id].started_at
+            first_login[label.scenario_id] = min(
+                first_login.get(label.scenario_id, started_at), started_at
+            )
+    fraud_swaps = [label for label in real_takeover_run.sim_swap_labels() if label.is_fraud]
+
+    assert episodes
+    assert Counter(label.scenario_id for label in fraud_swaps) == dict.fromkeys(episodes, 1)
+    for swap_label in fraud_swaps:
+        assert swap_label.scenario_id is not None
+        swap = swaps[swap_label.sim_swap_id]
+        assert swap.customer_id == episodes[swap_label.scenario_id].victim_customer_id
+        assert swap.swapped_at < first_login[swap_label.scenario_id]
+
+
+def test_a_takeovers_devices_and_payees_join_back_to_its_logins(
+    real_takeover_run: CollectedRows,
+) -> None:
+    episodes = takeovers(real_takeover_run)
+    scenario_by_session = {
+        label.session_id: label.scenario_id
+        for label in real_takeover_run.session_labels()
+        if label.scenario_id in episodes
+    }
+    new_devices = {
+        d.device_id for d in real_takeover_run.rows[HistoryTable.DEVICE] if isinstance(d, Device)
+    }
+    links = {(link.customer_id, link.device_id) for link in real_takeover_run.device_links()}
+
+    for session in real_takeover_run.sessions():
+        scenario_id = scenario_by_session.get(session.session_id)
+        if scenario_id is None:
+            continue
+        victim = episodes[scenario_id].victim_customer_id
+        assert session.customer_id == victim
+        if session.device_id is not None:
+            assert session.device_id in new_devices
+            assert (victim, session.device_id) in links
+
+    fraud_payees = {
+        e.beneficiary_id
+        for e in real_takeover_run.beneficiary_events()
+        if e.session_id in scenario_by_session
+    }
+    fraud_ids = {label.transaction_id for label in real_takeover_run.labels() if label.is_fraud}
+    paid = {
+        t.beneficiary_id
+        for t in real_takeover_run.transactions()
+        if t.transaction_id in fraud_ids and t.beneficiary_id is not None
+    }
+    assert fraud_payees
+    assert paid <= fraud_payees
+
+
+def test_takeover_money_leaves_by_payshap_and_eft_and_the_sweep_is_not_counted(
+    real_takeover_run: CollectedRows,
+) -> None:
+    episodes = takeovers(real_takeover_run)
+    by_id = {t.transaction_id: t for t in real_takeover_run.transactions()}
+    taken: Counter[str] = Counter()
+    channels = set()
+    for label in real_takeover_run.labels():
+        if label.scenario_id not in episodes:
+            continue
+        transaction = by_id[label.transaction_id]
+        channels.add(transaction.channel)
+        if (
+            transaction.status is TransactionStatus.APPROVED
+            and transaction.direction is Direction.DEBIT
+            and transaction.channel is not Channel.INTERNAL_TRANSFER
+        ):
+            taken[label.scenario_id] += transaction.amount_cents
+
+    assert channels == {Channel.INTERNAL_TRANSFER, Channel.PAYSHAP, Channel.EFT}
+    assert any(taken.values())
+    for scenario_id, episode in episodes.items():
+        assert episode.total_amount_cents == taken[scenario_id]

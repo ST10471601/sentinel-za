@@ -16,6 +16,7 @@ from sentinel.simulator.reference_data import ReferenceData
 from sentinel.simulator.sessions import LinkedDevice
 
 MONTHLY_INCOME_CENTS = 2_500_000
+NETWORK = "MNO-2"
 
 
 @pytest.fixture(scope="session")
@@ -45,6 +46,7 @@ def victims(
             plan_card_habits(
                 rng, customer, cards_by_customer[customer.customer_id], index
             ).favourites[MerchantCategory.ATM],
+            NETWORK,
         )
         for customer in reference_data.customers
     ]

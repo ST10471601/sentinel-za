@@ -321,6 +321,9 @@ says nothing.
 The simulator swaps about 1% of customers' SIMs a month, mostly in network store hours. About half
 are followed by a new device registered within 3 days (a browser for customers who bank mainly in
 one, else a phone), which looks like the start of a takeover. A customer stays on one network.
+Account takeovers (`sim_swap_takeover`) swap the SIM too, mostly in the evening and at weekends,
+then register a device within 30 minutes. The bank hears of every swap 1 to 6 hours after it,
+fraud or not.
 
 | Column | Type | PII | Description |
 |---|---|---|---|
@@ -513,7 +516,7 @@ Added to every bronze row by the ingestion consumer.
 | victim_customer_id | string | FK → customer (null for pure mule activity) |
 | started_at | timestamp | |
 | ended_at | timestamp | |
-| total_amount_cents | bigint | Total stolen in this episode |
+| total_amount_cents | bigint | Money that left the victim's accounts: approved debits, not counting transfers between the victim's own accounts |
 | params | string | JSON object of the parameters used, for reproducibility |
 
 **transaction_label** (one per transaction, fraud or not)
