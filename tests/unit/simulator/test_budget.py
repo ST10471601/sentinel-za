@@ -24,3 +24,10 @@ def test_overdrawn_and_unknown_accounts_have_nothing_to_spend() -> None:
     budget = DayBudget(random.Random(1), {ACCOUNT: -5_000})
     assert budget.remaining_cents(ACCOUNT) == -5_000
     assert budget.remaining_cents("ACC-0000999") == 0
+
+
+def test_moving_money_shifts_it_between_two_accounts() -> None:
+    savings = "ACC-0000002"
+    budget = DayBudget(random.Random(1), {ACCOUNT: -1_000, savings: 10_000})
+    budget.move(savings, ACCOUNT, 4_000)
+    assert (budget.remaining_cents(ACCOUNT), budget.remaining_cents(savings)) == (3_000, 6_000)

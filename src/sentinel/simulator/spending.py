@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
 from sentinel.core.datetimes import SAST
-from sentinel.domain.customers import Customer, IncomeBand, IncomeSource
+from sentinel.domain.customers import Customer, CustomerType, IncomeBand, IncomeSource
 from sentinel.domain.merchants import MerchantCategory
+from sentinel.simulator.randomness import pick
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +181,8 @@ INCOME_STEP_CENTS = 10_000  # simulation assumption: salaries are whole R100 amo
 
 ATM_STEP_CENTS = 5_000  # simulation assumption: withdrawals come in R50 steps
 MIN_AMOUNT_CENTS = 100  # R1
+# Simulation assumption: people type round amounts when they pay someone: R100, R50 or whole rands.
+TYPED_AMOUNT_STEPS: dict[int, float] = {10_000: 0.4, 5_000: 0.3, 100: 0.3}
 
 # Share of activity by hour of day in SA time: quiet at night, peaks at lunch and after work.
 HOUR_WEIGHTS: tuple[float, ...] = (
@@ -218,6 +221,18 @@ def card_amount(rng: random.Random, category: MerchantCategory, band: IncomeBand
     """Draw a card purchase amount for the category, sized to the income band."""
     scale = 1.0 if category in FIXED_PRICE_CATEGORIES else SPENDING_BY_BAND[band].amount_scale
     return sample_amount(rng, CATEGORY_AMOUNTS[category], scale)
+
+
+def typed_amount(rng: random.Random, customer: Customer, cents: int) -> int:
+    """The amount as the customer types it into a payment.
+
+    Individuals pay in whole rands, often rounded to R50 or R100. Businesses pay invoices, so
+    their amounts keep the cents.
+    """
+    if customer.customer_type is CustomerType.BUSINESS:
+        return cents
+    step = pick(rng, TYPED_AMOUNT_STEPS)
+    return max(step, round(cents / step) * step)
 
 
 def atm_amount(rng: random.Random, band: IncomeBand) -> int:

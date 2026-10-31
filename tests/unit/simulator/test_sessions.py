@@ -3,15 +3,17 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from sentinel.domain.customers import BankingChannel, Customer
+from sentinel.domain.customers import BankingChannel, Customer, CustomerType
 from sentinel.domain.devices import Device, DevicePlatform
 from sentinel.domain.sessions import SessionAuthMethod
 from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.reference_data import DEFAULT_SIMULATION_START, ReferenceData
 from sentinel.simulator.sessions import (
+    REMOTE_ACCESS_SHARE,
     LinkedDevice,
     devices_linked_by,
     group_devices_by_customer,
+    note_remote_access,
     start_session,
 )
 
@@ -92,3 +94,34 @@ def test_every_customer_can_log_in_on_their_own_devices(reference_data: Referenc
         devices = devices_linked_by(grouped[customer.customer_id], DEFAULT_SIMULATION_START)
         session = start_session(generator, session_ids, customer, devices, DEFAULT_SIMULATION_START)
         assert session.device_id is None or session.device_id in {d.device_id for d in devices}
+
+
+@pytest.mark.parametrize("customer_type", list(CustomerType))
+@pytest.mark.parametrize("platform", [DevicePlatform.ANDROID, DevicePlatform.WEB])
+def test_genuine_sessions_sometimes_report_remote_access(
+    customer: Customer, customer_type: CustomerType, platform: DevicePlatform
+) -> None:
+    generator = random.Random(2)
+    session = start_session(generator, IdSequence("SES"), customer, [device(platform)], FIRST_SEEN)
+    noted = [note_remote_access(generator, session, customer_type) for _ in range(40_000)]
+    flagged = [s for s in noted if s.remote_access_detected]
+
+    assert len(flagged) / len(noted) == pytest.approx(REMOTE_ACCESS_SHARE[customer_type], rel=0.2)
+    for item in flagged:
+        assert item.model_copy(update={"remote_access_detected": False}) == session
+
+
+def test_ussd_sessions_never_report_remote_access(
+    customer: Customer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(REMOTE_ACCESS_SHARE, CustomerType.INDIVIDUAL, 1.0)
+    generator = random.Random(3)
+    ussd = start_session(
+        generator, IdSequence("SES"), customer, [device(DevicePlatform.FEATURE_PHONE)], FIRST_SEEN
+    )
+    app = start_session(
+        generator, IdSequence("SES"), customer, [device(DevicePlatform.ANDROID)], FIRST_SEEN
+    )
+
+    assert note_remote_access(generator, ussd, CustomerType.INDIVIDUAL) == ussd
+    assert note_remote_access(generator, app, CustomerType.INDIVIDUAL).remote_access_detected

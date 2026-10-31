@@ -1,9 +1,9 @@
 """Legitimate but unusual events, so a model can't treat "different" as "fraud".
 
 Each one looks like part of a fraud pattern: a trip (sudden location change), a big
-purchase (amount spike), a new phone or browser (device change), a new payee paid a large
-amount (the shape of authorised push payment fraud) and a SIM swap, often followed by a new
-device (the start of an account takeover).
+purchase (amount spike), a new phone or browser (device change), new payees paid straight away,
+sometimes with savings moved in first (the shape of authorised push payment fraud) and a SIM
+swap, often followed by a new device (the start of an account takeover).
 """
 
 import random
@@ -18,7 +18,7 @@ from sentinel.domain.devices import CustomerDevice, Device, DevicePlatform
 from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.sim_swaps import SimSwapEvent
-from sentinel.simulator.beneficiaries import OTHER_BANKS
+from sentinel.simulator.beneficiaries import OTHER_BANKS, PERSONAL_PAYEE_NAMES, SHAP_ID_SHARE
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.card_activity import MerchantIndex, purchase_draft
 from sentinel.simulator.devices import IOS_SHARE, LINK_METHOD_BY_PLATFORM
@@ -28,8 +28,16 @@ from sentinel.simulator.identifiers import (
     IdSequence,
     make_account_number,
     make_device_fingerprint,
+    make_phone_number,
 )
-from sentinel.simulator.payments import PaymentHabits, PlannedPayment, pay_payee
+from sentinel.simulator.payments import (
+    PAYMENT_DELAY_SECONDS,
+    PaymentHabits,
+    PlannedPayment,
+    own_transfer,
+    pay_payee,
+    top_up_main,
+)
 from sentinel.simulator.randomness import chance, random_datetime_between
 from sentinel.simulator.sessions import devices_linked_by, start_session
 from sentinel.simulator.spending import (
@@ -38,6 +46,7 @@ from sentinel.simulator.spending import (
     pick_event_time,
     sample_amount,
     sample_daily_count,
+    typed_amount,
 )
 
 # Simulation assumptions: how often each event happens, per customer per month.
@@ -45,6 +54,7 @@ TRIP_RATE = 0.12  # individuals only
 BIG_PURCHASE_RATE = 0.10
 NEW_PHONE_RATE = 0.02  # a new phone every few years
 NEW_PAYEE_RATE = 0.12
+NEW_PERSON_PAYEE_RATE = 0.08  # individuals only: a friend, relative, landlord or domestic worker
 SIM_SWAP_RATE = 0.01  # lost, stolen or broken phones and SIM upgrades
 NEW_BROWSER_RATE = 0.05  # customers who already bank in a browser: new laptop, cleared cookies
 
@@ -62,6 +72,8 @@ NEW_PAYEE_NAMES: tuple[str, ...] = (
     "Car dealer", "Builder", "Attorney", "Furniture store", "Wedding venue",
     "Panel beater", "Movers", "Solar installer", "Driving school", "Vet",
 )  # fmt: skip
+
+TWO_PEOPLE_SHARE = 0.15  # moving house: a new landlord and domestic worker saved together
 
 ADD_PAYEE_DELAY_SECONDS = (30, 300)  # from logging in to saving the payee
 PAY_NEW_PAYEE_DELAY_SECONDS = (30, 600)  # from saving the payee to paying it
@@ -117,9 +129,14 @@ class NewBrowser:
 
 @dataclass(frozen=True, slots=True)
 class NewPayee:
-    """The customer saves a new payee and pays them a large amount straight away."""
+    """The customer saves a new payee and pays them straight away.
+
+    A once-off bill (a deposit, a builder) is a large amount and never paid again. A person is
+    paid a usual amount and joins the customer's regular payees.
+    """
 
     day: date
+    is_person: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,12 +165,12 @@ class DeviceChange:
 
 @dataclass(frozen=True, slots=True)
 class PayeeChange:
-    """Rows created when a new payee is saved and paid."""
+    """Rows created when new payees are saved and paid, in one login session."""
 
-    beneficiary: Beneficiary
-    event: BeneficiaryEvent
+    beneficiaries: tuple[Beneficiary, ...]
+    events: tuple[BeneficiaryEvent, ...]
     session: LoginSession
-    payment: PlannedPayment
+    payments: tuple[PlannedPayment, ...]  # any money moved in from savings or credit comes first
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +232,18 @@ def plan_new_browsers(
     """Pick the days a customer who banks in a browser links a new one."""
     count = _count_over_period(rng, NEW_BROWSER_RATE, day_count)
     return tuple(NewBrowser(_random_day(rng, first_day, day_count)) for _ in range(count))
+
+
+def plan_person_payees(
+    rng: random.Random, customer: Customer, first_day: date, day_count: int
+) -> tuple[UnusualEvent, ...]:
+    """Pick the days an individual saves a new person to pay, such as a friend or a landlord."""
+    if customer.customer_type is not CustomerType.INDIVIDUAL:
+        return ()
+    count = _count_over_period(rng, NEW_PERSON_PAYEE_RATE, day_count)
+    return tuple(
+        NewPayee(_random_day(rng, first_day, day_count), is_person=True) for _ in range(count)
+    )
 
 
 def trip_on(events: tuple[UnusualEvent, ...], day: date) -> Trip | None:
@@ -329,22 +358,42 @@ def add_and_pay_new_payee(
     habits: PaymentHabits,
     ids: EventIds,
     budget: DayBudget,
+    transfer_groups: IdSequence,
 ) -> PayeeChange | None:
-    """Save a new payee and pay them, or None if the customer can't afford it."""
-    profile = SPENDING_BY_BAND[customer.income_band]
-    amount = round(sample_amount(rng, profile.payment_amount) * rng.uniform(*NEW_PAYEE_MULTIPLIER))
-    if not budget.try_spend(habits.main_account.account_id, amount):
+    """Save new payees and pay them, or None if the customer can't afford it.
+
+    When the main account is short, the customer first moves the money in from savings or the
+    credit card, in the same session.
+    """
+    payees = _new_payees(rng, customer, event)
+    total = sum(amount for _, amount in payees)
+    top_ups = top_up_main(budget, habits, total)
+    if not budget.try_spend(habits.main_account.account_id, total):
         return None
 
     logged_in_at = pick_event_time(rng, event.day)
     devices = devices_linked_by(habits.devices, logged_in_at)
     session = start_session(rng, ids.sessions, customer, devices, logged_in_at)
-    saved_at = _seconds_after(rng, logged_in_at, ADD_PAYEE_DELAY_SECONDS)
-    name = rng.choice(NEW_PAYEE_NAMES)
-    beneficiary, created = save_new_payee(rng, ids, customer, name, session, saved_at)
-    paid_at = _seconds_after(rng, saved_at, PAY_NEW_PAYEE_DELAY_SECONDS)
-    payment = pay_payee(rng, customer, habits, session, beneficiary, amount, paid_at)
-    return PayeeChange(beneficiary, created, session, payment)
+    main, moment = habits.main_account, logged_in_at
+    payments: list[PlannedPayment] = []
+    for source, amount in top_ups:
+        moment = _seconds_after(rng, moment, PAYMENT_DELAY_SECONDS)
+        payments.append(own_transfer(transfer_groups, session, source, main, amount, moment))
+
+    saved: list[tuple[Beneficiary, BeneficiaryEvent]] = []
+    for name, _ in payees:
+        moment = _seconds_after(rng, moment, ADD_PAYEE_DELAY_SECONDS)
+        shap_id = make_phone_number(rng) if event.is_person and chance(rng, SHAP_ID_SHARE) else None
+        saved.append(save_new_payee(rng, ids, customer, name, session, moment, shap_id))
+    for (beneficiary, _), (_, amount) in zip(saved, payees, strict=True):
+        moment = _seconds_after(rng, moment, PAY_NEW_PAYEE_DELAY_SECONDS)
+        payments.append(pay_payee(rng, customer, habits, session, beneficiary, amount, moment))
+    return PayeeChange(
+        beneficiaries=tuple(beneficiary for beneficiary, _ in saved),
+        events=tuple(created for _, created in saved),
+        session=session,
+        payments=tuple(payments),
+    )
 
 
 def save_new_payee(
@@ -354,6 +403,7 @@ def save_new_payee(
     name: str,
     session: LoginSession,
     saved_at: datetime,
+    shap_id: str | None = None,
 ) -> tuple[Beneficiary, BeneficiaryEvent]:
     """Save a payee at another bank in an open login session, and the event that records it."""
     beneficiary = Beneficiary(
@@ -363,7 +413,7 @@ def save_new_payee(
         payee_bank=rng.choice(OTHER_BANKS),
         payee_account_number=make_account_number(rng),
         payee_internal_account_id=None,
-        shap_id=None,
+        shap_id=shap_id,
         created_at=saved_at,
     )
     created = BeneficiaryEvent(
@@ -376,6 +426,19 @@ def save_new_payee(
         new_account_number=beneficiary.payee_account_number,
     )
     return beneficiary, created
+
+
+def _new_payees(rng: random.Random, customer: Customer, event: NewPayee) -> list[tuple[str, int]]:
+    """Names and amounts: one large once-off bill, or one or two people paid usual amounts."""
+    usual = SPENDING_BY_BAND[customer.income_band].payment_amount
+    if not event.is_person:
+        amount = round(sample_amount(rng, usual) * rng.uniform(*NEW_PAYEE_MULTIPLIER))
+        return [(rng.choice(NEW_PAYEE_NAMES), typed_amount(rng, customer, amount))]
+    count = 2 if chance(rng, TWO_PEOPLE_SHARE) else 1
+    return [
+        (name, typed_amount(rng, customer, sample_amount(rng, usual)))
+        for name in rng.sample(PERSONAL_PAYEE_NAMES, count)
+    ]
 
 
 def _plan_trip(

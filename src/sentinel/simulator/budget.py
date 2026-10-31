@@ -25,6 +25,11 @@ class DayBudget:
         """Money left in the account for the rest of the day."""
         return self._remaining.get(account_id, 0)
 
+    def move(self, source_id: str, target_id: str, amount_cents: int) -> None:
+        """Shift money between two of the customer's accounts, as an own-account transfer does."""
+        self._remaining[source_id] = self.remaining_cents(source_id) - amount_cents
+        self._remaining[target_id] = self.remaining_cents(target_id) + amount_cents
+
     def try_spend(self, account_id: str, amount_cents: int) -> bool:
         """Return True if the customer goes ahead with this spend."""
         remaining = self.remaining_cents(account_id)

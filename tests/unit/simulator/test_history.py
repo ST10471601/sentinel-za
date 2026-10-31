@@ -11,7 +11,8 @@ from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import AccountType, Card, CardEvent, CardEventType
 from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.base import DomainModel
-from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
+from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent, BeneficiaryEventType
+from sentinel.domain.customers import BankingChannel, CustomerType
 from sentinel.domain.devices import CustomerDevice, Device, DeviceLinkMethod, DevicePlatform
 from sentinel.domain.labels import (
     BalanceEnquiryLabel,
@@ -32,7 +33,8 @@ from sentinel.domain.transactions import (
     Transaction,
     TransactionStatus,
 )
-from sentinel.simulator import history, unusual_events
+from sentinel.simulator import history, payments, unusual_events
+from sentinel.simulator.beneficiaries import PERSONAL_PAYEE_NAMES
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.card_replacement import REPLACEMENT_DAYS
 from sentinel.simulator.fraud.episodes import (
@@ -45,7 +47,9 @@ from sentinel.simulator.fraud.episodes import (
 from sentinel.simulator.fraud.planning import FRAUD_MIX, FraudSettings
 from sentinel.simulator.history import HistorySummary, HistoryTable, simulate_history
 from sentinel.simulator.identifiers import IdSequence
+from sentinel.simulator.payee_changes import DELETION_RATE, DETAILS_CHANGE_RATE
 from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
+from sentinel.simulator.sessions import REMOTE_ACCESS_SHARE
 from sentinel.simulator.unusual_events import (
     NETWORK_SHARES,
     EventIds,
@@ -126,6 +130,13 @@ class CollectedRows:
     def beneficiary_events(self) -> list[BeneficiaryEvent]:
         rows = self.rows[HistoryTable.BENEFICIARY_EVENT]
         return [row for row in rows if isinstance(row, BeneficiaryEvent)]
+
+    def beneficiaries(self) -> list[Beneficiary]:
+        rows = self.rows[HistoryTable.BENEFICIARY]
+        return [row for row in rows if isinstance(row, Beneficiary)]
+
+    def is_fraud_session(self) -> dict[str, bool]:
+        return {label.session_id: label.is_fraud for label in self.session_labels()}
 
 
 @pytest.fixture(scope="module")
@@ -728,16 +739,19 @@ class FakeTakeover:
         swap = notify_sim_swap(rng, self.ids.sim_swaps, customer, "MNO-1", self.start)
         phone = register_new_phone(rng, customer, NewPhone(day, not_before=self.start), self.ids)
         budget = DayBudget(rng, {habits.main_account.account_id: 10**12})  # the ledger decides
-        payee = add_and_pay_new_payee(rng, customer, NewPayee(day), habits, self.ids, budget)
+        unused = IdSequence("TRF", 9)  # the budget never runs short, so nothing is moved in
+        payee = add_and_pay_new_payee(
+            rng, customer, NewPayee(day), habits, self.ids, budget, unused
+        )
         assert payee is not None
         return FraudActions(
-            attempts=[payee.payment],
+            attempts=list(payee.payments),
             sim_swaps=[swap],
             devices=[phone.device],
             device_links=[phone.link],
             sessions=[phone.session, payee.session],
-            beneficiaries=[payee.beneficiary],
-            beneficiary_events=[payee.event],
+            beneficiaries=list(payee.beneficiaries),
+            beneficiary_events=list(payee.events),
         )
 
 
@@ -939,3 +953,155 @@ def test_takeover_money_leaves_by_payshap_and_eft_and_the_sweep_is_not_counted(
     assert any(taken.values())
     for scenario_id, episode in episodes.items():
         assert episode.total_amount_cents == taken[scenario_id]
+
+
+@pytest.fixture(scope="module")
+def look_alike_run(reference: ReferenceData) -> CollectedRows:
+    """Genuine behaviour that looks like a payment scam, far more often than usual."""
+    sink = CollectedRows()
+    with pytest.MonkeyPatch.context() as patch:
+        for customer_type in CustomerType:
+            patch.setitem(REMOTE_ACCESS_SHARE, customer_type, 0.05)
+            patch.setitem(DETAILS_CHANGE_RATE, customer_type, 0.1)
+            patch.setitem(DELETION_RATE, customer_type, 0.1)
+        patch.setattr(unusual_events, "NEW_PERSON_PAYEE_RATE", 1.0)
+        patch.setattr(payments, "SAVINGS_WITHDRAWAL_RATE", 2.0)
+        patch.setattr(payments, "CREDIT_CARD_TRANSFER_RATE", 2.0)
+        simulate_history(reference, MONTHS, sink)
+    return sink
+
+
+def test_some_genuine_logins_report_remote_access(look_alike_run: CollectedRows) -> None:
+    is_fraud = look_alike_run.is_fraud_session()
+    flagged = [s for s in look_alike_run.sessions() if s.remote_access_detected]
+
+    assert flagged
+    for session in flagged:
+        assert not is_fraud[session.session_id]
+        assert session.channel is not BankingChannel.USSD
+
+
+def test_customers_change_and_delete_payees_each_in_its_own_login(
+    look_alike_run: CollectedRows,
+) -> None:
+    owner = {b.beneficiary_id: b.customer_id for b in look_alike_run.beneficiaries()}
+    sessions = {s.session_id: s for s in look_alike_run.sessions()}
+    is_fraud = look_alike_run.is_fraud_session()
+    events_per_session = Counter(e.session_id for e in look_alike_run.beneficiary_events())
+    edits = [
+        e
+        for e in look_alike_run.beneficiary_events()
+        if e.event_type is not BeneficiaryEventType.CREATED
+    ]
+
+    assert {e.event_type for e in edits} == {
+        BeneficiaryEventType.DETAILS_CHANGED,
+        BeneficiaryEventType.DELETED,
+    }
+    for edit in edits:
+        assert sessions[edit.session_id].customer_id == owner[edit.beneficiary_id]
+        assert events_per_session[edit.session_id] == 1
+        assert not is_fraud[edit.session_id]
+
+
+def test_a_deleted_payee_is_never_paid_again_but_a_changed_one_is(
+    look_alike_run: CollectedRows,
+) -> None:
+    events = look_alike_run.beneficiary_events()
+    deleted_at = {
+        e.beneficiary_id: e.event_time
+        for e in events
+        if e.event_type is BeneficiaryEventType.DELETED
+    }
+    changed_at = {
+        e.beneficiary_id: e.event_time
+        for e in events
+        if e.event_type is BeneficiaryEventType.DETAILS_CHANGED
+    }
+    paid_after_change = False
+    for transaction in look_alike_run.transactions():
+        payee = transaction.beneficiary_id
+        if payee in deleted_at:
+            assert transaction.event_time < deleted_at[payee]
+        if payee in changed_at and transaction.event_time > changed_at[payee]:
+            paid_after_change = True
+    assert paid_after_change
+
+
+def test_genuine_customers_move_savings_and_credit_into_the_main_account(
+    reference: ReferenceData, look_alike_run: CollectedRows
+) -> None:
+    account_type = {a.account_id: a.account_type for a in reference.accounts}
+    is_fraud = {label.transaction_id: label.is_fraud for label in look_alike_run.labels()}
+    sources = {
+        account_type[t.account_id]
+        for t in look_alike_run.transactions()
+        if t.channel is Channel.INTERNAL_TRANSFER
+        and t.direction is Direction.DEBIT
+        and not is_fraud[t.transaction_id]
+    }
+    assert {AccountType.SAVINGS, AccountType.CREDIT_CARD} <= sources
+
+
+def test_genuine_customers_save_new_people_some_with_shap_ids_and_some_two_at_once(
+    reference: ReferenceData, look_alike_run: CollectedRows
+) -> None:
+    is_fraud = look_alike_run.is_fraud_session()
+    created_in = {
+        e.beneficiary_id: e.session_id
+        for e in look_alike_run.beneficiary_events()
+        if e.event_type is BeneficiaryEventType.CREATED
+    }
+    new_people = [
+        b
+        for b in look_alike_run.beneficiaries()
+        if b.created_at >= reference.simulation_start
+        and b.beneficiary_name in PERSONAL_PAYEE_NAMES
+        and not is_fraud[created_in[b.beneficiary_id]]
+    ]
+
+    assert new_people
+    assert any(b.shap_id is not None for b in new_people)
+    assert any(b.shap_id is None for b in new_people)
+    assert 2 in Counter(created_in[b.beneficiary_id] for b in new_people).values()
+
+
+def test_some_genuine_new_payees_are_paid_with_money_moved_in_first(
+    reference: ReferenceData, look_alike_run: CollectedRows
+) -> None:
+    account_type = {a.account_id: a.account_type for a in reference.accounts}
+    is_fraud = look_alike_run.is_fraud_session()
+    payee_sessions = {
+        e.session_id
+        for e in look_alike_run.beneficiary_events()
+        if e.event_type is BeneficiaryEventType.CREATED and not is_fraud[e.session_id]
+    }
+    reserves = {AccountType.SAVINGS, AccountType.CREDIT_CARD}
+    topped_up = {
+        t.session_id
+        for t in look_alike_run.transactions()
+        if t.channel is Channel.INTERNAL_TRANSFER
+        and t.direction is Direction.DEBIT
+        and account_type[t.account_id] in reserves
+    }
+    assert payee_sessions & topped_up
+
+
+def test_customers_never_delete_more_payees_than_they_saved(reference: ReferenceData) -> None:
+    sink = CollectedRows()
+    with pytest.MonkeyPatch.context() as patch:
+        for customer_type in CustomerType:
+            patch.setitem(DELETION_RATE, customer_type, 20.0)
+        simulate_history(reference, MONTHS, sink, FraudSettings(0.0))
+    owner = {b.beneficiary_id: b.customer_id for b in sink.beneficiaries()}
+    saved = Counter(owner.values())
+    deleted = [
+        e.beneficiary_id
+        for e in sink.beneficiary_events()
+        if e.event_type is BeneficiaryEventType.DELETED
+    ]
+
+    assert len(set(deleted)) == len(deleted)  # each payee is deleted at most once
+    deleted_by_customer = Counter(owner[payee] for payee in deleted)
+    assert all(deleted_by_customer[c] <= saved[c] for c in saved)
+    assert any(deleted_by_customer[c] == saved[c] for c in saved)  # some ran out of payees

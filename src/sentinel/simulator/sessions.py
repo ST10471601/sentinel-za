@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sentinel.domain.customers import BankingChannel, Customer
+from sentinel.domain.customers import BankingChannel, Customer, CustomerType
 from sentinel.domain.devices import CustomerDevice, Device, DevicePlatform
 from sentinel.domain.sessions import LoginSession, SessionAuthMethod
 from sentinel.simulator.geography import jitter_point
@@ -16,6 +16,13 @@ from sentinel.simulator.randomness import chance
 HOME_COUNTRY = "ZA"
 APP_LOCATION_JITTER_DEGREES = 0.05  # about 5 km around home
 BIOMETRIC_LOGIN_SHARE = 0.7  # of app logins; the rest type a password
+
+# Simulation assumption: share of app and internet logins with screen-sharing software running for
+# a genuine reason: a relative or the phone shop helping, or IT support on a business's computers.
+REMOTE_ACCESS_SHARE: dict[CustomerType, float] = {
+    CustomerType.INDIVIDUAL: 0.002,
+    CustomerType.BUSINESS: 0.01,
+}
 
 CHANNEL_BY_PLATFORM: dict[DevicePlatform, BankingChannel] = {
     DevicePlatform.ANDROID: BankingChannel.APP,
@@ -97,3 +104,14 @@ def start_session(
         lon=location[1],
         remote_access_detected=False,
     )
+
+
+def note_remote_access(
+    rng: random.Random, session: LoginSession, customer_type: CustomerType
+) -> LoginSession:
+    """The genuine session as the bank sees it: now and then screen-sharing software is running."""
+    if session.channel is BankingChannel.USSD:
+        return session  # no app or browser to detect it
+    if not chance(rng, REMOTE_ACCESS_SHARE[customer_type]):
+        return session
+    return session.model_copy(update={"remote_access_detected": True})

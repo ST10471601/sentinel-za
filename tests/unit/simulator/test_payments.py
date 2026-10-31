@@ -8,7 +8,7 @@ import pytest
 from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import Account, AccountStatus, AccountType
 from sentinel.domain.beneficiaries import Beneficiary
-from sentinel.domain.customers import Customer
+from sentinel.domain.customers import Customer, CustomerType
 from sentinel.domain.sessions import LoginSession
 from sentinel.domain.transactions import (
     Channel,
@@ -16,21 +16,26 @@ from sentinel.domain.transactions import (
     TransactionAuthMethod,
     TransactionStatus,
 )
+from sentinel.simulator import payments
 from sentinel.simulator.beneficiaries import PayeeHistory
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.drafts import Settlement, to_transaction
 from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.payments import (
     DAYS_AFTER_PAY_FOR_TRANSFERS,
+    EMPTY_ACCOUNT_SHARE,
     MIN_REPAYMENT_CENTS,
     OTP_THRESHOLD_CENTS,
+    PART_SHARE,
     DayPayments,
     PaymentHabits,
     PaymentIds,
+    PlannedPayment,
     own_transfer,
     payee_payment,
     payment_activity,
     plan_payment_habits,
+    top_up_main,
 )
 from sentinel.simulator.reference_data import ReferenceData
 from sentinel.simulator.sessions import LinkedDevice
@@ -38,6 +43,7 @@ from sentinel.simulator.spending import last_pay_date
 
 MARCH = [date(2026, 3, 1) + timedelta(days=offset) for offset in range(31)]
 RICH = 10**12
+RESERVES = 1_234_567  # in savings and on the credit card, so a whole balance is easy to spot
 APPROVED = Settlement(TransactionStatus.APPROVED, None, 0)
 SAMPLE_SIZE = 150
 
@@ -67,15 +73,21 @@ def sample(
 
 
 def simulate_month(
-    sample: list[tuple[Customer, PaymentHabits]], budget_cents: int = RICH, seed: int = 6
+    sample: list[tuple[Customer, PaymentHabits]],
+    budget_cents: int = RICH,
+    seed: int = 6,
+    reserves_cents: int = 0,
 ) -> list[tuple[Customer, DayPayments]]:
     generator = random.Random(seed)
     ids = PaymentIds(IdSequence("SES"), IdSequence("TRF", digits=9))
     results = []
     for customer, habits in sample:
         owed = habits.credit_account.opening_balance_cents if habits.credit_account else 0
+        reserves = [a for a in (habits.savings_account, habits.credit_account) if a is not None]
         for day in MARCH:
-            budget = DayBudget(generator, {habits.main_account.account_id: budget_cents})
+            available = {account.account_id: reserves_cents for account in reserves}
+            available[habits.main_account.account_id] = budget_cents
+            budget = DayBudget(generator, available)
             activity = payment_activity(generator, customer, habits, day, 1.0, budget, ids, owed)
             results.append((customer, activity))
     return results
@@ -328,3 +340,146 @@ def test_own_transfers_can_go_between_any_two_own_accounts(
     assert debit.event_time == credit.event_time == moved_at
     for draft in (debit, credit):
         to_transaction(draft, 1, APPROVED)
+
+
+def test_individuals_pay_whole_rands_and_businesses_pay_to_the_cent(
+    month: list[tuple[Customer, DayPayments]],
+) -> None:
+    amounts: dict[CustomerType, list[int]] = defaultdict(list)
+    for customer, activity in month:
+        for payment in activity.payments:
+            if payment.debit.channel is not Channel.INTERNAL_TRANSFER:
+                amounts[customer.customer_type].append(payment.debit.amount_cents)
+
+    assert all(amount % 100 == 0 for amount in amounts[CustomerType.INDIVIDUAL])
+    business = amounts[CustomerType.BUSINESS]
+    assert sum(amount % 100 == 0 for amount in business) < 0.1 * len(business)
+
+
+@pytest.fixture(scope="module")
+def short_month(
+    sample: list[tuple[Customer, PaymentHabits]],
+) -> list[tuple[Customer, DayPayments]]:
+    """A month in which customers move savings or credit into the main account almost daily."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(payments, "SAVINGS_WITHDRAWAL_RATE", 30.0)
+        patch.setattr(payments, "CREDIT_CARD_TRANSFER_RATE", 30.0)
+        return simulate_month(sample, reserves_cents=RESERVES)
+
+
+def moved_to_main(
+    sample: list[tuple[Customer, PaymentHabits]], results: list[tuple[Customer, DayPayments]]
+) -> list[tuple[PaymentHabits, PlannedPayment]]:
+    habits_by_customer = {customer.customer_id: habits for customer, habits in sample}
+    moves = []
+    for customer, activity in results:
+        habits = habits_by_customer[customer.customer_id]
+        for payment in activity.payments:
+            credit = payment.credit
+            if credit is not None and credit.account_id == habits.main_account.account_id:
+                moves.append((habits, payment))
+    return moves
+
+
+def test_savings_and_credit_move_into_the_main_account_in_their_own_login(
+    sample: list[tuple[Customer, PaymentHabits]],
+    short_month: list[tuple[Customer, DayPayments]],
+) -> None:
+    sessions = {s.session_id: s for _, activity in short_month for s in activity.sessions}
+    sources: set[AccountType] = set()
+    for habits, move in moved_to_main(sample, short_month):
+        own = {a.account_id: a for a in (habits.savings_account, habits.credit_account) if a}
+        sources.add(own[move.debit.account_id].account_type)
+        assert move.credit is not None
+        assert move.debit.channel is Channel.INTERNAL_TRANSFER
+        assert move.debit.transfer_group_id == move.credit.transfer_group_id
+        session = sessions[str(move.debit.session_id)]
+        assert session.customer_id == habits.main_account.customer_id
+    assert sources == {AccountType.SAVINGS, AccountType.CREDIT_CARD}
+
+
+def test_customers_move_everything_up_to_the_limit_or_a_round_part(
+    sample: list[tuple[Customer, PaymentHabits]],
+    short_month: list[tuple[Customer, DayPayments]],
+) -> None:
+    moves = moved_to_main(sample, short_month)
+    limits = {
+        account.account_id: account.daily_transfer_limit_cents
+        for _, habits in sample
+        for account in (habits.savings_account, habits.credit_account)
+        if account is not None
+    }
+    emptied = 0
+    for _, move in moves:
+        usable = min(RESERVES, limits[move.debit.account_id])
+        amount = move.debit.amount_cents
+        if amount == usable // 100 * 100:
+            emptied += 1
+            continue
+        assert amount % 10_000 == 0
+        assert amount <= min(usable, round(RESERVES * PART_SHARE[1]))
+    assert emptied / len(moves) == pytest.approx(EMPTY_ACCOUNT_SHARE, abs=0.05)
+
+
+def test_without_reserves_nothing_moves_into_the_main_account(
+    sample: list[tuple[Customer, PaymentHabits]],
+) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(payments, "SAVINGS_WITHDRAWAL_RATE", 30.0)
+        patch.setattr(payments, "CREDIT_CARD_TRANSFER_RATE", 30.0)
+        broke = simulate_month(sample[:30], reserves_cents=0)
+    assert not moved_to_main(sample, broke)
+
+
+@pytest.fixture(scope="module")
+def reserves(sample: list[tuple[Customer, PaymentHabits]]) -> PaymentHabits:
+    """Habits with savings and a credit card, with room to move any amount in a day."""
+    habits = next(h for _, h in sample if h.savings_account and h.credit_account)
+    assert habits.savings_account is not None
+    assert habits.credit_account is not None
+    no_limit = {"daily_transfer_limit_cents": RICH}
+    return replace(
+        habits,
+        savings_account=habits.savings_account.model_copy(update=no_limit),
+        credit_account=habits.credit_account.model_copy(update=no_limit),
+    )
+
+
+def reserve_budget(habits: PaymentHabits, main: int, savings: int, credit: int) -> DayBudget:
+    assert habits.savings_account is not None
+    assert habits.credit_account is not None
+    available = {
+        habits.main_account.account_id: main,
+        habits.savings_account.account_id: savings,
+        habits.credit_account.account_id: credit,
+    }
+    return DayBudget(random.Random(1), available)
+
+
+def test_no_top_up_when_the_main_account_can_pay(reserves: PaymentHabits) -> None:
+    budget = reserve_budget(reserves, main=50_000, savings=RICH, credit=RICH)
+    assert top_up_main(budget, reserves, 50_000) == []
+    assert budget.remaining_cents(reserves.main_account.account_id) == 50_000
+
+
+def test_a_shortfall_is_topped_up_in_round_amounts_from_savings_then_credit(
+    reserves: PaymentHabits,
+) -> None:
+    assert reserves.savings_account is not None
+    budget = reserve_budget(reserves, main=20_000, savings=30_050, credit=RICH)
+    moves = top_up_main(budget, reserves, 75_001)
+
+    # R550.01 short, rounded up to R600: R300 is all savings has in round R100s.
+    assert [(account.account_type, cents) for account, cents in moves] == [
+        (AccountType.SAVINGS, 30_000),
+        (AccountType.CREDIT_CARD, 30_000),
+    ]
+    assert budget.remaining_cents(reserves.main_account.account_id) == 80_000
+    assert budget.remaining_cents(reserves.savings_account.account_id) == 50
+
+
+def test_no_top_up_when_savings_and_credit_cannot_cover_it(reserves: PaymentHabits) -> None:
+    assert reserves.savings_account is not None
+    budget = reserve_budget(reserves, main=0, savings=10_000, credit=10_000)
+    assert top_up_main(budget, reserves, 50_000) == []
+    assert budget.remaining_cents(reserves.savings_account.account_id) == 10_000

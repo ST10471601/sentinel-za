@@ -22,6 +22,7 @@ from sentinel.simulator.spending import (
     pick_event_time,
     sample_amount,
     sample_daily_count,
+    typed_amount,
 )
 
 HOME_COUNTRY = "ZA"
@@ -34,6 +35,16 @@ DAYS_AFTER_PAY_FOR_TRANSFERS = 1
 SAVINGS_TOPUP_CHANCE = 0.5
 SAVINGS_TOPUP_SHARE = (0.05, 0.15)  # of monthly income
 MIN_REPAYMENT_CENTS = 10_000  # R100; smaller amounts owed are left for next month
+
+# Simulation assumptions: money moved into the main account for an emergency or a big purchase,
+# per customer per month. Moving credit out is a cash advance that earns interest from day one,
+# so it is rarer than dipping into savings.
+SAVINGS_WITHDRAWAL_RATE = 0.15
+CREDIT_CARD_TRANSFER_RATE = 0.03
+EMPTY_ACCOUNT_SHARE = 0.2  # everything available moves; the rest move part of it
+PART_SHARE = (0.1, 0.5)  # of what is available
+TRANSFER_STEP_CENTS = 10_000  # R100: people move round amounts
+RAND_CENTS = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,12 +136,13 @@ def payment_activity(
 
     if habits.beneficiaries:
         for _ in range(sample_daily_count(rng, profile.payments_per_month, weight)):
-            amount = sample_amount(rng, profile.payment_amount)
+            amount = typed_amount(rng, customer, sample_amount(rng, profile.payment_amount))
             if budget.try_spend(habits.main_account.account_id, amount):
                 _add_payee_payment(payer, day, amount, activity)
 
     if (day - last_pay_date(day, customer.pay_day)).days == DAYS_AFTER_PAY_FOR_TRANSFERS:
         _add_own_transfers(payer, day, budget, credit_owed_cents, activity)
+    _add_transfers_to_main(payer, day, budget, activity)
     return activity
 
 
@@ -216,7 +228,8 @@ def _add_own_transfers(
             amounts.append((habits.credit_account, repayment))
 
     if habits.savings_account is not None and chance(rng, SAVINGS_TOPUP_CHANCE):
-        topup = round(habits.monthly_income_cents * rng.uniform(*SAVINGS_TOPUP_SHARE))
+        share = rng.uniform(*SAVINGS_TOPUP_SHARE)
+        topup = typed_amount(rng, payer.customer, round(habits.monthly_income_cents * share))
         if topup > 0 and budget.try_spend(main_id, topup):
             amounts.append((habits.savings_account, topup))
 
@@ -230,6 +243,67 @@ def _add_own_transfers(
             payer.ids.transfer_groups, session, habits.main_account, target, amount, event_time
         )
         activity.payments.append(transfer)
+
+
+def _add_transfers_to_main(
+    payer: _Payer, day: date, budget: DayBudget, activity: DayPayments
+) -> None:
+    """Now and then move savings or credit into the main account, when money is short."""
+    rng, habits = payer.rng, payer.habits
+    main = habits.main_account
+    sources = (
+        (habits.savings_account, SAVINGS_WITHDRAWAL_RATE),
+        (habits.credit_account, CREDIT_CARD_TRANSFER_RATE),
+    )
+    for source, rate in sources:
+        if source is None or not sample_daily_count(rng, rate, weight=1.0):
+            continue
+        amount = _amount_to_move(rng, source, budget.remaining_cents(source.account_id))
+        if amount <= 0:
+            continue
+        budget.move(source.account_id, main.account_id, amount)
+        session = _log_in(payer, pick_event_time(rng, day))
+        activity.sessions.append(session)
+        moved_at = _after_login(rng, session)
+        transfer = own_transfer(payer.ids.transfer_groups, session, source, main, amount, moved_at)
+        activity.payments.append(transfer)
+
+
+def _amount_to_move(rng: random.Random, source: Account, available_cents: int) -> int:
+    """Everything available up to the daily limit, or a round part of it."""
+    limit = source.daily_transfer_limit_cents
+    if chance(rng, EMPTY_ACCOUNT_SHARE):
+        return min(available_cents, limit) // RAND_CENTS * RAND_CENTS
+    part = min(round(available_cents * rng.uniform(*PART_SHARE)), limit)
+    return part // TRANSFER_STEP_CENTS * TRANSFER_STEP_CENTS
+
+
+def top_up_main(
+    budget: DayBudget, habits: PaymentHabits, amount_cents: int
+) -> list[tuple[Account, int]]:
+    """Move money into the main account from savings, then the credit card, so a payment fits.
+
+    Returns the transfers to make: none when the main account can already pay, or when savings
+    and credit together can't cover the shortfall.
+    """
+    main_id = habits.main_account.account_id
+    shortfall = _round_up(amount_cents - max(budget.remaining_cents(main_id), 0))
+    if shortfall <= 0:
+        return []
+    moves: list[tuple[Account, int]] = []
+    for source in (habits.savings_account, habits.credit_account):
+        if source is None or shortfall <= 0:
+            continue
+        usable = min(budget.remaining_cents(source.account_id), source.daily_transfer_limit_cents)
+        amount = min(shortfall, usable // TRANSFER_STEP_CENTS * TRANSFER_STEP_CENTS)
+        if amount > 0:
+            moves.append((source, amount))
+            shortfall -= amount
+    if shortfall > 0:
+        return []
+    for source, amount in moves:
+        budget.move(source.account_id, main_id, amount)
+    return moves
 
 
 def own_transfer(
@@ -281,6 +355,11 @@ def _payment_auth(session: LoginSession, amount_cents: int) -> TransactionAuthMe
     if amount_cents > OTP_THRESHOLD_CENTS or session.auth_method is not SessionAuthMethod.BIOMETRIC:
         return TransactionAuthMethod.OTP
     return TransactionAuthMethod.BIOMETRIC
+
+
+def _round_up(cents: int) -> int:
+    """Up to the next R100, the way people top up an account."""
+    return -(-cents // TRANSFER_STEP_CENTS) * TRANSFER_STEP_CENTS
 
 
 def _first_active(accounts: Sequence[Account], account_type: AccountType) -> Account | None:

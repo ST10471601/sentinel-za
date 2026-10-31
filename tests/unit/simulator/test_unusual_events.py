@@ -1,17 +1,18 @@
 import random
 from collections import Counter
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from sentinel.core.datetimes import to_sast
-from sentinel.domain.accounts import Account, Card
+from sentinel.domain.accounts import Account, AccountStatus, AccountType, Card
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEventType
 from sentinel.domain.customers import BankingChannel, Customer, CustomerType
 from sentinel.domain.devices import DeviceLinkMethod, DevicePlatform
 from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.transactions import Channel, TransactionStatus
-from sentinel.simulator.beneficiaries import PayeeHistory
+from sentinel.simulator.beneficiaries import PERSONAL_PAYEE_NAMES, SHAP_ID_SHARE, PayeeHistory
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.card_activity import MerchantIndex, plan_card_habits
 from sentinel.simulator.drafts import Settlement, to_transaction
@@ -20,19 +21,23 @@ from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.payments import PaymentHabits, plan_payment_habits
 from sentinel.simulator.reference_data import ReferenceData
 from sentinel.simulator.sessions import LinkedDevice
-from sentinel.simulator.spending import CATEGORY_AMOUNTS
+from sentinel.simulator.spending import CATEGORY_AMOUNTS, SPENDING_BY_BAND
 from sentinel.simulator.unusual_events import (
     BOOKING_DAYS_AHEAD,
     DEVICE_SETUP_SECONDS,
     NEW_DEVICE_AFTER_SWAP_DAYS,
+    NEW_PAYEE_NAMES,
+    NEW_PERSON_PAYEE_RATE,
     SIM_SWAP_NOTICE_SECONDS,
     STORE_HOURS,
     TRIP_DAYS,
+    TWO_PEOPLE_SHARE,
     BigPurchase,
     EventIds,
     NewBrowser,
     NewPayee,
     NewPhone,
+    PayeeChange,
     SimSwap,
     Trip,
     UnusualEvent,
@@ -41,6 +46,7 @@ from sentinel.simulator.unusual_events import (
     big_purchase_draft,
     notify_sim_swap,
     plan_new_browsers,
+    plan_person_payees,
     plan_sim_swaps,
     plan_unusual_events,
     register_device,
@@ -69,6 +75,18 @@ def event_ids() -> EventIds:
         beneficiary_events=IdSequence("BEV", start_after=100),
         sim_swaps=IdSequence("SIM"),
     )
+
+
+def transfer_groups() -> IdSequence:
+    return IdSequence("TRF", digits=9)
+
+
+def pay_new_person(
+    generator: random.Random, customer: Customer, habits: PaymentHabits, budget: DayBudget
+) -> PayeeChange | None:
+    event = NewPayee(date(2026, 5, 20), is_person=True)
+    ids, groups = event_ids(), transfer_groups()
+    return add_and_pay_new_payee(generator, customer, event, habits, ids, budget, groups)
 
 
 @pytest.fixture(scope="module")
@@ -120,6 +138,27 @@ def payment_habits(
         own_payees,
         devices_by_customer[individual.customer_id],
         monthly_income_cents=2_000_000,
+    )
+
+
+@pytest.fixture(scope="module")
+def habits_with_reserves(
+    payment_habits: PaymentHabits, reference_data: ReferenceData
+) -> PaymentHabits:
+    """The individual's habits with a savings account and credit card that allow big transfers."""
+
+    def first_active(account_type: AccountType) -> Account:
+        account = next(
+            a
+            for a in reference_data.accounts
+            if a.account_type is account_type and a.status is AccountStatus.ACTIVE
+        )
+        return account.model_copy(update={"daily_transfer_limit_cents": RICH})
+
+    return replace(
+        payment_habits,
+        savings_account=first_active(AccountType.SAVINGS),
+        credit_account=first_active(AccountType.CREDIT_CARD),
     )
 
 
@@ -272,16 +311,20 @@ def test_new_payee_is_saved_then_paid_a_large_amount(
 ) -> None:
     event = NewPayee(date(2026, 5, 20))
     budget = DayBudget(rng(), {payment_habits.main_account.account_id: RICH})
-    change = add_and_pay_new_payee(rng(), individual, event, payment_habits, event_ids(), budget)
+    change = add_and_pay_new_payee(
+        rng(), individual, event, payment_habits, event_ids(), budget, transfer_groups()
+    )
     assert change is not None
 
-    payee, created, session, payment = (
-        change.beneficiary,
-        change.event,
+    (payee,), (created,), session, (payment,) = (
+        change.beneficiaries,
+        change.events,
         change.session,
-        change.payment,
+        change.payments,
     )
     assert payee.beneficiary_id == "BEN-0000101"
+    assert payee.beneficiary_name in NEW_PAYEE_NAMES
+    assert payee.shap_id is None
     assert created.event_type is BeneficiaryEventType.CREATED
     assert created.session_id == session.session_id == payment.debit.session_id
     assert session.started_at < payee.created_at == created.event_time < payment.debit.event_time
@@ -297,12 +340,109 @@ def test_new_payee_is_skipped_when_unaffordable(
     generator = rng()
     made = sum(
         add_and_pay_new_payee(
-            generator, individual, event, payment_habits, event_ids(), DayBudget(generator, {})
+            generator,
+            individual,
+            event,
+            payment_habits,
+            event_ids(),
+            DayBudget(generator, {}),
+            transfer_groups(),
         )
         is not None
         for _ in range(500)
     )
     assert made < 100
+
+
+def test_a_short_main_account_is_topped_up_from_savings_then_credit_in_the_same_session(
+    individual: Customer, habits_with_reserves: PaymentHabits
+) -> None:
+    habits = habits_with_reserves
+    assert habits.savings_account is not None
+    assert habits.credit_account is not None
+    main_id = habits.main_account.account_id
+    savings_id, credit_id = habits.savings_account.account_id, habits.credit_account.account_id
+    generator = rng()
+
+    for _ in range(50):
+        budget = DayBudget(generator, {main_id: 0, savings_id: 10_050, credit_id: RICH})
+        event = NewPayee(date(2026, 5, 20))
+        ids, groups = event_ids(), transfer_groups()
+        change = add_and_pay_new_payee(generator, individual, event, habits, ids, budget, groups)
+        assert change is not None
+        *moves, payment = change.payments
+        sources = [move.debit.account_id for move in moves]
+        assert sources == [savings_id, credit_id]  # savings first, then credit
+        assert {move.debit.channel for move in moves} == {Channel.INTERNAL_TRANSFER}
+        assert {move.debit.session_id for move in change.payments} == {change.session.session_id}
+        assert moves[0].debit.amount_cents == 10_000  # all savings had, in round R100s
+        moved = sum(move.debit.amount_cents for move in moves)
+        assert payment.debit.amount_cents <= moved < payment.debit.amount_cents + 10_000
+        assert moves[-1].debit.event_time < change.beneficiaries[0].created_at
+
+
+def test_a_new_person_is_paid_a_usual_amount_and_sometimes_has_a_shap_id(
+    individual: Customer, payment_habits: PaymentHabits
+) -> None:
+    generator = rng()
+    budget = DayBudget(generator, {payment_habits.main_account.account_id: RICH})
+    changes = [pay_new_person(generator, individual, payment_habits, budget) for _ in range(1_000)]
+    payees = [payee for change in changes if change for payee in change.beneficiaries]
+    amounts = [p.debit.amount_cents for change in changes if change for p in change.payments]
+    sessions = Counter(len(change.beneficiaries) for change in changes if change)
+
+    assert all(payee.beneficiary_name in PERSONAL_PAYEE_NAMES for payee in payees)
+    assert sum(payee.shap_id is not None for payee in payees) / len(payees) == pytest.approx(
+        SHAP_ID_SHARE, abs=0.05
+    )
+    assert sessions[2] / len(changes) == pytest.approx(TWO_PEOPLE_SHARE, abs=0.03)
+    assert set(sessions) == {1, 2}
+    usual = SPENDING_BY_BAND[individual.income_band].payment_amount.median_cents
+    assert sorted(amounts)[len(amounts) // 2] < 2 * usual  # not a large once-off bill
+    assert all(amount % 100 == 0 for amount in amounts)  # people type whole rands
+
+
+def test_two_new_people_are_saved_before_either_is_paid(
+    individual: Customer, payment_habits: PaymentHabits
+) -> None:
+    generator = rng()
+    budget = DayBudget(generator, {payment_habits.main_account.account_id: RICH})
+    for _ in range(200):
+        change = pay_new_person(generator, individual, payment_habits, budget)
+        assert change is not None
+        if len(change.beneficiaries) < 2:
+            continue
+        first, second = change.beneficiaries
+        assert first.beneficiary_name != second.beneficiary_name
+        assert second.created_at < change.payments[0].debit.event_time
+        paid = [payment.debit.beneficiary_id for payment in change.payments]
+        assert paid == [first.beneficiary_id, second.beneficiary_id]
+        return
+    pytest.fail("no change saved two people")
+
+
+def test_only_individuals_save_new_people_at_the_monthly_rate(
+    reference_data: ReferenceData,
+) -> None:
+    generator = rng()
+    plans = [
+        (customer, plan_person_payees(generator, customer, FIRST_DAY, SIX_MONTHS))
+        for customer in reference_data.customers
+        for _ in range(5)
+    ]
+    individuals = [events for c, events in plans if c.customer_type is CustomerType.INDIVIDUAL]
+    businesses = [events for c, events in plans if c.customer_type is CustomerType.BUSINESS]
+
+    assert businesses
+    assert not any(businesses)
+    count = sum(len(events) for events in individuals)
+    assert count / len(individuals) / (SIX_MONTHS / 30.44) == pytest.approx(
+        NEW_PERSON_PAYEE_RATE, abs=0.005
+    )
+    for events in individuals:
+        for event in events:
+            assert isinstance(event, NewPayee)
+            assert event.is_person
 
 
 def test_same_seed_gives_the_same_plan(individual: Customer) -> None:

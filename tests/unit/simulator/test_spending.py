@@ -16,6 +16,7 @@ from sentinel.simulator.spending import (
     MAIN_GRANT_CENTS,
     PAYDAY_BOOST,
     SPENDING_BY_BAND,
+    TYPED_AMOUNT_STEPS,
     WEEKDAY_WEIGHTS,
     TypicalAmount,
     activity_weight,
@@ -27,6 +28,7 @@ from sentinel.simulator.spending import (
     pick_monthly_income,
     sample_amount,
     sample_daily_count,
+    typed_amount,
 )
 
 DRAWS = 20_000
@@ -120,6 +122,30 @@ def test_atm_withdrawals_come_in_whole_steps() -> None:
     generator = rng()
     amounts = [atm_amount(generator, IncomeBand.LOW) for _ in range(1_000)]
     assert all(amount % ATM_STEP_CENTS == 0 and amount >= ATM_STEP_CENTS for amount in amounts)
+
+
+def test_individuals_type_whole_rands_often_rounded_to_r50_or_r100(
+    reference_data: ReferenceData,
+) -> None:
+    person = next(c for c in reference_data.customers if c.customer_type is CustomerType.INDIVIDUAL)
+    generator = rng()
+    typed = {
+        cents: typed_amount(generator, person, cents) for cents in range(100_000, 100_000 + DRAWS)
+    }
+    amounts = list(typed.values())
+
+    assert all(amount % 100 == 0 for amount in amounts)
+    # R100 and R50 steps; the rest are whole rands, of which only 1 in 50 lands on R50.
+    round_share = sum(amount % 5_000 == 0 for amount in amounts) / DRAWS
+    expected = TYPED_AMOUNT_STEPS[10_000] + TYPED_AMOUNT_STEPS[5_000] + TYPED_AMOUNT_STEPS[100] / 50
+    assert round_share == pytest.approx(expected, abs=0.02)
+    assert all(abs(amount - cents) <= 5_000 for cents, amount in typed.items())  # nearest step
+    assert typed_amount(generator, person, 1) >= 100  # never rounded down to nothing
+
+
+def test_businesses_pay_invoices_to_the_cent(reference_data: ReferenceData) -> None:
+    business = next(c for c in reference_data.customers if c.customer_type is CustomerType.BUSINESS)
+    assert typed_amount(rng(), business, 1_234_567) == 1_234_567
 
 
 @pytest.mark.parametrize(
