@@ -10,7 +10,7 @@ from sentinel.domain.accounts import AccountType, Card, CardEvent, CardEventType
 from sentinel.domain.balance_enquiries import BalanceEnquiry
 from sentinel.domain.base import DomainModel
 from sentinel.domain.beneficiaries import Beneficiary
-from sentinel.domain.devices import Device
+from sentinel.domain.devices import CustomerDevice, Device
 from sentinel.domain.labels import (
     BalanceEnquiryLabel,
     FraudType,
@@ -18,6 +18,7 @@ from sentinel.domain.labels import (
     TransactionLabel,
 )
 from sentinel.domain.sessions import LoginSession
+from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.domain.transactions import (
     Channel,
     DeclineReason,
@@ -26,10 +27,12 @@ from sentinel.domain.transactions import (
     Transaction,
     TransactionStatus,
 )
+from sentinel.simulator import unusual_events
 from sentinel.simulator.card_replacement import REPLACEMENT_DAYS
 from sentinel.simulator.fraud.planning import FRAUD_MIX, FraudSettings
 from sentinel.simulator.history import HistorySummary, HistoryTable, simulate_history
 from sentinel.simulator.reference_data import ReferenceData, generate_reference_data
+from sentinel.simulator.unusual_events import NETWORK_SHARES
 
 SEED = 21
 CUSTOMERS = 150
@@ -77,6 +80,14 @@ class CollectedRows:
         rows = self.rows[HistoryTable.BALANCE_ENQUIRY_LABEL]
         return [row for row in rows if isinstance(row, BalanceEnquiryLabel)]
 
+    def sim_swaps(self) -> list[SimSwapEvent]:
+        rows = self.rows[HistoryTable.SIM_SWAP_EVENT]
+        return [row for row in rows if isinstance(row, SimSwapEvent)]
+
+    def device_links(self) -> list[CustomerDevice]:
+        rows = self.rows[HistoryTable.CUSTOMER_DEVICE]
+        return [row for row in rows if isinstance(row, CustomerDevice)]
+
 
 @pytest.fixture(scope="module")
 def reference() -> ReferenceData:
@@ -98,7 +109,13 @@ def test_every_table_gets_rows_and_the_summary_counts_them(
     run: tuple[HistorySummary, CollectedRows],
 ) -> None:
     summary, sink = run
-    for table in (HistoryTable.TRANSACTION, HistoryTable.LOGIN_SESSION, HistoryTable.BENEFICIARY):
+    tables = (
+        HistoryTable.TRANSACTION,
+        HistoryTable.LOGIN_SESSION,
+        HistoryTable.BENEFICIARY,
+        HistoryTable.SIM_SWAP_EVENT,
+    )
+    for table in tables:
         assert sink.rows[table]
     assert summary.row_counts == {table: len(sink.rows[table]) for table in HistoryTable}
 
@@ -556,3 +573,50 @@ def test_fraudsters_check_the_balance_on_the_card_they_hold(
     for label in fraud:
         assert label.fraud_type in CARD_AND_PIN_FRAUD_TYPES
         assert by_id[label.balance_enquiry_id].card_id in held
+
+
+@pytest.fixture(scope="module")
+def swap_heavy_run(reference: ReferenceData) -> CollectedRows:
+    """Half the customers swap their SIM each month, so some swap more than once."""
+    sink = CollectedRows()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(unusual_events, "SIM_SWAP_RATE", 0.5)
+        simulate_history(reference, MONTHS, sink, FraudSettings(0.0))
+    return sink
+
+
+def test_sim_swaps_are_on_the_customers_own_number(
+    reference: ReferenceData, swap_heavy_run: CollectedRows
+) -> None:
+    phone_by_customer = {c.customer_id: c.phone_number for c in reference.customers}
+    swaps = swap_heavy_run.sim_swaps()
+
+    assert len({s.sim_swap_id for s in swaps}) == len(swaps)
+    for swap in swaps:
+        assert swap.phone_number == phone_by_customer[swap.customer_id]
+
+
+def test_a_customer_stays_on_one_network_across_sim_swaps(swap_heavy_run: CollectedRows) -> None:
+    networks_by_customer: dict[str, list[str]] = defaultdict(list)
+    for swap in swap_heavy_run.sim_swaps():
+        networks_by_customer[swap.customer_id].append(swap.network)
+
+    assert any(len(networks) > 1 for networks in networks_by_customer.values())
+    assert all(len(set(networks)) == 1 for networks in networks_by_customer.values())
+    assert {n for ns in networks_by_customer.values() for n in ns} == set(NETWORK_SHARES)
+
+
+def test_about_half_of_sim_swaps_are_followed_by_a_new_phone(
+    swap_heavy_run: CollectedRows,
+) -> None:
+    links_by_customer: dict[str, list[datetime]] = defaultdict(list)
+    for link in swap_heavy_run.device_links():
+        links_by_customer[link.customer_id].append(link.linked_at)
+
+    def has_new_phone(swap: SimSwapEvent) -> bool:
+        window_end = swap.swapped_at + timedelta(days=4)
+        return any(swap.swapped_at < at < window_end for at in links_by_customer[swap.customer_id])
+
+    swaps = swap_heavy_run.sim_swaps()
+    # Swaps late in the month lose some new phones to the end of the run.
+    assert 0.3 < sum(has_new_phone(swap) for swap in swaps) / len(swaps) < 0.6

@@ -1,20 +1,23 @@
 """Legitimate but unusual events, so a model can't treat "different" as "fraud".
 
 Each one looks like part of a fraud pattern: a trip (sudden location change), a big
-purchase (amount spike), a new phone (device change) and a new payee paid a large amount
-(the shape of authorised push payment fraud).
+purchase (amount spike), a new phone (device change), a new payee paid a large amount
+(the shape of authorised push payment fraud) and a SIM swap, often followed by a new phone
+(the start of an account takeover).
 """
 
 import random
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
+from sentinel.core.datetimes import SAST, to_sast
 from sentinel.domain.accounts import Card
 from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent, BeneficiaryEventType
 from sentinel.domain.customers import Customer, CustomerType
 from sentinel.domain.devices import CustomerDevice, Device, DeviceLinkMethod, DevicePlatform
 from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.sessions import LoginSession
+from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.simulator.beneficiaries import OTHER_BANKS
 from sentinel.simulator.budget import DayBudget
 from sentinel.simulator.card_activity import MerchantIndex, purchase_draft
@@ -27,7 +30,7 @@ from sentinel.simulator.identifiers import (
     make_device_fingerprint,
 )
 from sentinel.simulator.payments import PaymentHabits, PlannedPayment, pay_payee
-from sentinel.simulator.randomness import chance
+from sentinel.simulator.randomness import chance, random_datetime_between
 from sentinel.simulator.sessions import devices_linked_by, start_session
 from sentinel.simulator.spending import (
     CATEGORY_AMOUNTS,
@@ -42,6 +45,7 @@ TRIP_RATE = 0.12  # individuals only
 BIG_PURCHASE_RATE = 0.10
 NEW_PHONE_RATE = 0.02  # a new phone every few years
 NEW_PAYEE_RATE = 0.12
+SIM_SWAP_RATE = 0.01  # lost, stolen or broken phones and SIM upgrades
 
 TRIP_DAYS = (2, 6)
 BOOKING_DAYS_AHEAD = (3, 21)  # a trip is booked online this long before leaving
@@ -60,6 +64,20 @@ NEW_PAYEE_NAMES: tuple[str, ...] = (
 
 ADD_PAYEE_DELAY_SECONDS = (30, 300)  # from logging in to saving the payee
 PAY_NEW_PAYEE_DELAY_SECONDS = (30, 600)  # from saving the payee to paying it
+
+# Simulation assumptions for SIM swaps. The rest of the swaps move the new SIM into a phone
+# that is already on the profile.
+SIM_SWAP_NEW_PHONE_SHARE = 0.5
+NEW_PHONE_AFTER_SWAP_DAYS = (0, 3)
+PHONE_SETUP_SECONDS = (10 * 60, 120 * 60)  # from getting the new SIM to registering the phone
+STORE_SWAP_SHARE = 0.85  # the rest go through a call centre or an eSIM in the network's app
+STORE_HOURS: tuple[tuple[int, int], ...] = ((8, 18),) * 5 + ((8, 15), (9, 13))  # Monday first
+# Fraud uses the same delay, so the gap before the bank hears of a swap says nothing alone.
+SIM_SWAP_NOTICE_SECONDS = (1 * 3600, 6 * 3600)
+
+# Share of SA mobile subscribers per network, largest first, from the four networks' own counts
+# (late 2024 to mid 2025: 50.7m, 39.2m, 24m and 7.7m).
+NETWORK_SHARES: dict[str, float] = {"MNO-1": 0.42, "MNO-2": 0.32, "MNO-3": 0.20, "MNO-4": 0.06}
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +102,7 @@ class NewPhone:
     """The customer registers a new phone on their profile."""
 
     day: date
+    not_before: datetime | None = None  # after a SIM swap, the registration OTP needs the new SIM
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +112,19 @@ class NewPayee:
     day: date
 
 
-type UnusualEvent = Trip | BigPurchase | NewPhone | NewPayee
+@dataclass(frozen=True, slots=True)
+class SimSwap:
+    """The customer's number moves to a new SIM card."""
+
+    swapped_at: datetime
+
+    @property
+    def day(self) -> date:
+        """The SA calendar day of the swap."""
+        return to_sast(self.swapped_at).date()
+
+
+type UnusualEvent = Trip | BigPurchase | NewPhone | NewPayee | SimSwap
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +154,7 @@ class EventIds:
     devices: IdSequence
     beneficiaries: IdSequence
     beneficiary_events: IdSequence
+    sim_swaps: IdSequence
 
 
 def plan_unusual_events(
@@ -142,6 +174,21 @@ def plan_unusual_events(
         events.append(NewPhone(_random_day(rng, first_day, day_count)))
     for _ in range(_count_over_period(rng, NEW_PAYEE_RATE, day_count)):
         events.append(NewPayee(_random_day(rng, first_day, day_count)))
+    return tuple(events)
+
+
+def plan_sim_swaps(rng: random.Random, first_day: date, day_count: int) -> tuple[UnusualEvent, ...]:
+    """Pick when a customer's SIM is swapped, and whether a new phone is registered after."""
+    last_day = first_day + timedelta(days=day_count - 1)
+    events: list[UnusualEvent] = []
+    for _ in range(_count_over_period(rng, SIM_SWAP_RATE, day_count)):
+        swap = SimSwap(_pick_swap_time(rng, _random_day(rng, first_day, day_count)))
+        events.append(swap)
+        if not chance(rng, SIM_SWAP_NEW_PHONE_SHARE):
+            continue
+        phone_day = swap.day + timedelta(days=rng.randint(*NEW_PHONE_AFTER_SWAP_DAYS))
+        if phone_day <= last_day:
+            events.append(NewPhone(phone_day, not_before=swap.swapped_at))
     return tuple(events)
 
 
@@ -195,6 +242,8 @@ def register_new_phone(
 ) -> PhoneChange:
     """Register a new smartphone and log in on it."""
     registered_at = pick_event_time(rng, event.day)
+    if event.not_before is not None and registered_at < event.not_before:
+        registered_at = _seconds_after(rng, event.not_before, PHONE_SETUP_SECONDS)
     is_ios = chance(rng, IOS_SHARE[customer.income_band])
     device = Device(
         device_id=ids.devices.next_id(),
@@ -210,6 +259,24 @@ def register_new_phone(
     )
     session = start_session(rng, ids.sessions, customer, [device], registered_at)
     return PhoneChange(device, link, session)
+
+
+def notify_sim_swap(
+    rng: random.Random,
+    sim_swap_ids: IdSequence,
+    customer: Customer,
+    network: str,
+    swapped_at: datetime,
+) -> SimSwapEvent:
+    """The network's notice to the bank that the customer's number moved to a new SIM."""
+    return SimSwapEvent(
+        sim_swap_id=sim_swap_ids.next_id(),
+        customer_id=customer.customer_id,
+        phone_number=customer.phone_number,
+        swapped_at=swapped_at,
+        notified_at=_seconds_after(rng, swapped_at, SIM_SWAP_NOTICE_SECONDS),
+        network=network,
+    )
 
 
 def add_and_pay_new_payee(
@@ -269,6 +336,14 @@ def _plan_trip(
     if booked_on >= first_day:
         events.append(BigPurchase(booked_on, MerchantCategory.TRAVEL_AGENCY))
     return events
+
+
+def _pick_swap_time(rng: random.Random, day: date) -> datetime:
+    """A time in network store hours, or at any hour by phone or app."""
+    opens, closes = STORE_HOURS[day.weekday()] if chance(rng, STORE_SWAP_SHARE) else (0, 24)
+    start = datetime.combine(day, time(opens), tzinfo=SAST)
+    end = start + timedelta(hours=closes - opens)
+    return random_datetime_between(rng, start, end).astimezone(UTC)
 
 
 def _count_over_period(rng: random.Random, rate_per_month: float, day_count: int) -> int:
