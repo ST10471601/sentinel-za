@@ -1,6 +1,6 @@
 import random
 from collections import Counter
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -22,16 +22,23 @@ from sentinel.simulator.sessions import LinkedDevice
 from sentinel.simulator.spending import CATEGORY_AMOUNTS
 from sentinel.simulator.unusual_events import (
     BOOKING_DAYS_AHEAD,
+    NEW_PHONE_AFTER_SWAP_DAYS,
+    PHONE_SETUP_SECONDS,
+    SIM_SWAP_NOTICE_SECONDS,
+    STORE_HOURS,
     TRIP_DAYS,
     BigPurchase,
     EventIds,
     NewPayee,
     NewPhone,
+    SimSwap,
     Trip,
     UnusualEvent,
     add_and_pay_new_payee,
     away_customer,
     big_purchase_draft,
+    notify_sim_swap,
+    plan_sim_swaps,
     plan_unusual_events,
     register_new_phone,
     trip_on,
@@ -55,6 +62,7 @@ def event_ids() -> EventIds:
         devices=IdSequence("DEV", start_after=100),
         beneficiaries=IdSequence("BEN", start_after=100),
         beneficiary_events=IdSequence("BEV", start_after=100),
+        sim_swaps=IdSequence("SIM"),
     )
 
 
@@ -70,6 +78,16 @@ def plans(reference_data: ReferenceData) -> Plans:
         (customer, plan_unusual_events(generator, customer, FIRST_DAY, SIX_MONTHS))
         for customer in reference_data.customers
     ]
+
+
+@pytest.fixture(scope="module")
+def swap_plans() -> list[tuple[UnusualEvent, ...]]:
+    generator = rng()
+    return [plan_sim_swaps(generator, FIRST_DAY, SIX_MONTHS) for _ in range(20_000)]
+
+
+def swaps_in(plans: list[tuple[UnusualEvent, ...]]) -> list[SimSwap]:
+    return [event for events in plans for event in events if isinstance(event, SimSwap)]
 
 
 @pytest.fixture(scope="module")
@@ -275,3 +293,71 @@ def test_new_payee_is_skipped_when_unaffordable(
 def test_same_seed_gives_the_same_plan(individual: Customer) -> None:
     first = plan_unusual_events(rng(), individual, FIRST_DAY, SIX_MONTHS)
     assert first == plan_unusual_events(rng(), individual, FIRST_DAY, SIX_MONTHS)
+
+
+def test_sim_swaps_follow_the_monthly_rate(swap_plans: list[tuple[UnusualEvent, ...]]) -> None:
+    months = SIX_MONTHS / 30.44
+    rate = len(swaps_in(swap_plans)) / len(swap_plans) / months
+    assert rate == pytest.approx(0.01, abs=0.002)
+
+
+def test_about_half_of_sim_swaps_bring_a_new_phone(
+    swap_plans: list[tuple[UnusualEvent, ...]],
+) -> None:
+    phones = [e for events in swap_plans for e in events if isinstance(e, NewPhone)]
+    assert len(phones) / len(swaps_in(swap_plans)) == pytest.approx(0.5, abs=0.06)
+
+
+def test_a_new_phone_comes_0_to_3_days_after_its_sim_swap(
+    swap_plans: list[tuple[UnusualEvent, ...]],
+) -> None:
+    for events in swap_plans:
+        swap_by_time = {e.swapped_at: e for e in events if isinstance(e, SimSwap)}
+        for phone in (e for e in events if isinstance(e, NewPhone)):
+            assert phone.not_before is not None
+            swap = swap_by_time[phone.not_before]
+            low, high = NEW_PHONE_AFTER_SWAP_DAYS
+            assert low <= (phone.day - swap.day).days <= high
+            assert phone.day <= FIRST_DAY + timedelta(days=SIX_MONTHS - 1)
+
+
+def test_most_sim_swaps_happen_in_store_hours(swap_plans: list[tuple[UnusualEvent, ...]]) -> None:
+    def in_store_hours(swap: SimSwap) -> bool:
+        local = to_sast(swap.swapped_at)
+        opens, closes = STORE_HOURS[local.weekday()]
+        return opens <= local.hour < closes
+
+    swaps = swaps_in(swap_plans)
+    share = sum(in_store_hours(swap) for swap in swaps) / len(swaps)
+    # 85% go to a store; some phone and app swaps also land in store hours.
+    assert 0.85 < share < 0.97
+
+
+def test_bank_hears_of_a_sim_swap_hours_later(individual: Customer) -> None:
+    swapped_at = datetime(2026, 3, 4, 9, 30, tzinfo=UTC)
+    ids = IdSequence("SIM")
+    generator = rng()
+    swaps = [notify_sim_swap(generator, ids, individual, "MNO-2", swapped_at) for _ in range(200)]
+
+    assert swaps[0].sim_swap_id == "SIM-0000001"
+    assert {(s.customer_id, s.phone_number, s.network) for s in swaps} == {
+        (individual.customer_id, individual.phone_number, "MNO-2")
+    }
+    lags = [(s.notified_at - s.swapped_at).total_seconds() for s in swaps]
+    assert SIM_SWAP_NOTICE_SECONDS[0] <= min(lags) <= max(lags) <= SIM_SWAP_NOTICE_SECONDS[1]
+
+
+def test_a_phone_after_a_sim_swap_is_registered_after_the_swap(individual: Customer) -> None:
+    day = date(2026, 4, 2)
+    late_swap = datetime(2026, 4, 2, 20, 0, tzinfo=UTC)  # 22:00 in SA
+    early_swap = datetime(2026, 4, 1, 22, 1, tzinfo=UTC)  # a minute past midnight in SA
+
+    generator = rng()
+    for _ in range(50):
+        late = register_new_phone(generator, individual, NewPhone(day, late_swap), event_ids())
+        setup_seconds = (late.link.linked_at - late_swap).total_seconds()
+        assert 0 <= setup_seconds <= PHONE_SETUP_SECONDS[1]
+
+    early = register_new_phone(rng(), individual, NewPhone(day, early_swap), event_ids())
+    plain = register_new_phone(rng(), individual, NewPhone(day), event_ids())
+    assert early.link.linked_at == plain.link.linked_at  # a later usual time is kept

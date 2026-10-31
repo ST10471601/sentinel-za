@@ -187,7 +187,7 @@ Each file's metadata records the seed and simulation start that produced it.
 
 **Simulated history (batch, until the streaming simulator replays it):** `uv run sentinel simulate history`
 writes the reference data, then `transaction`, `balance_enquiry`, `login_session`, `beneficiary`,
-`beneficiary_event`, `card_event`, and the `device`, `customer_device` and `card` rows added during the period to `data/history/`.
+`beneficiary_event`, `card_event`, `sim_swap_event`, and the `device`, `customer_device` and `card` rows added during the period to `data/history/`.
 Fraud is injected into the same day-by-day run, so stolen money really leaves balances.
 The ground truth (`scenario_instance`, `transaction_label`, `balance_enquiry_label`) goes to
 `data/truth/`, apart from what the bank can observe. Rows are written in batches, so memory stays flat however long the run.
@@ -299,6 +299,10 @@ A device can be linked to more than one customer. A single fraudster device link
 | link_method | string | | `app_registration`, `otp`, `branch` |
 
 ### sim_swap_event
+
+The simulator swaps about 1% of customers' SIMs a month, mostly in network store hours. About half
+are followed by a new phone registered within 3 days, which looks like the start of a takeover.
+A customer stays on one network.
 
 | Column | Type | PII | Description |
 |---|---|---|---|

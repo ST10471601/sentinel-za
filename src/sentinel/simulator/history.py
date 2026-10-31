@@ -19,6 +19,7 @@ from sentinel.domain.devices import CustomerDevice, Device
 from sentinel.domain.labels import BalanceEnquiryLabel, ScenarioInstance, TransactionLabel
 from sentinel.domain.merchants import MerchantCategory
 from sentinel.domain.sessions import LoginSession
+from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.domain.transactions import Direction, Transaction, TransactionStatus
 from sentinel.simulator.beneficiaries import generate_beneficiaries
 from sentinel.simulator.budget import DayBudget
@@ -55,7 +56,7 @@ from sentinel.simulator.payments import (
     payment_activity,
     plan_payment_habits,
 )
-from sentinel.simulator.randomness import make_rng
+from sentinel.simulator.randomness import make_rng, pick
 from sentinel.simulator.recurring import (
     RecurringPlan,
     find_main_account,
@@ -66,15 +67,19 @@ from sentinel.simulator.reference_data import ReferenceData
 from sentinel.simulator.sessions import LinkedDevice, group_devices_by_customer
 from sentinel.simulator.spending import activity_weight, last_pay_date
 from sentinel.simulator.unusual_events import (
+    NETWORK_SHARES,
     BigPurchase,
     EventIds,
     NewPayee,
     NewPhone,
+    SimSwap,
     Trip,
     UnusualEvent,
     add_and_pay_new_payee,
     away_customer,
     big_purchase_draft,
+    notify_sim_swap,
+    plan_sim_swaps,
     plan_unusual_events,
     register_new_phone,
     trip_on,
@@ -82,7 +87,7 @@ from sentinel.simulator.unusual_events import (
 
 TRANSACTION_ID_DIGITS = 9
 
-type DayEvent = BigPurchase | NewPhone | NewPayee  # events that happen on a single day
+type DayEvent = BigPurchase | NewPhone | NewPayee | SimSwap  # events that happen on a single day
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +102,7 @@ class HistoryTable(StrEnum):
     BENEFICIARY_EVENT = "beneficiary_event"
     DEVICE = "device"  # devices registered during the simulation
     CUSTOMER_DEVICE = "customer_device"
+    SIM_SWAP_EVENT = "sim_swap_event"
     CARD = "card"  # replacement cards issued during the simulation
     CARD_EVENT = "card_event"
     SCENARIO_INSTANCE = "scenario_instance"
@@ -112,6 +118,7 @@ MODEL_BY_TABLE: dict[HistoryTable, type[DomainModel]] = {
     HistoryTable.BENEFICIARY_EVENT: BeneficiaryEvent,
     HistoryTable.DEVICE: Device,
     HistoryTable.CUSTOMER_DEVICE: CustomerDevice,
+    HistoryTable.SIM_SWAP_EVENT: SimSwapEvent,
     HistoryTable.CARD: Card,
     HistoryTable.CARD_EVENT: CardEvent,
     HistoryTable.SCENARIO_INSTANCE: ScenarioInstance,
@@ -169,6 +176,7 @@ class _CustomerPlan:
     payments: PaymentHabits
     events: tuple[UnusualEvent, ...]
     events_by_day: dict[date, list[DayEvent]]  # everything except trips, by day
+    network: str  # the customer's mobile network, the same for every SIM swap
     trip_habits: dict[Trip, CardHabits] = field(default_factory=dict)
 
 
@@ -192,6 +200,7 @@ class _DayOutput:
     device_links: list[CustomerDevice] = field(default_factory=list)
     beneficiaries: list[Beneficiary] = field(default_factory=list)
     beneficiary_events: list[BeneficiaryEvent] = field(default_factory=list)
+    sim_swaps: list[SimSwapEvent] = field(default_factory=list)
 
 
 def simulate_history(
@@ -249,14 +258,17 @@ class _Simulation:
             devices=IdSequence("DEV", start_after=len(reference.devices)),
             beneficiaries=IdSequence("BEN", start_after=len(payees.beneficiaries)),
             beneficiary_events=IdSequence("BEV", start_after=len(payees.events)),
+            sim_swaps=IdSequence("SIM"),
         )
 
         payees_by_customer = _group(payees.beneficiaries, lambda b: b.customer_id)
         plan_rng = make_rng(reference.seed, "plans")
+        swap_rng = make_rng(reference.seed, "sim-swaps")
         day_count = (self._last_day - self._first_day).days + 1
         self._plans = [
             self._plan_customer(
                 plan_rng,
+                swap_rng,
                 customer,
                 accounts[customer.customer_id],
                 cards[customer.customer_id],
@@ -342,6 +354,7 @@ class _Simulation:
     def _plan_customer(
         self,
         rng: random.Random,
+        swap_rng: random.Random,
         customer: Customer,
         accounts: list[Account],
         cards: list[Card],
@@ -350,7 +363,9 @@ class _Simulation:
         day_count: int,
     ) -> _CustomerPlan:
         recurring = plan_recurring(rng, customer, find_main_account(accounts))
+        network = pick(swap_rng, NETWORK_SHARES)
         events = plan_unusual_events(rng, customer, self._first_day, day_count)
+        events += plan_sim_swaps(swap_rng, self._first_day, day_count)
         events_by_day: dict[date, list[DayEvent]] = defaultdict(list)
         for event in events:
             if not isinstance(event, Trip):
@@ -364,6 +379,7 @@ class _Simulation:
             payments=plan_payment_habits(accounts, payees, devices, recurring.monthly_income_cents),
             events=events,
             events_by_day=events_by_day,
+            network=network,
         )
 
     def _run_day(self, day: date) -> None:
@@ -381,6 +397,7 @@ class _Simulation:
         self._emit(HistoryTable.LOGIN_SESSION, output.sessions)
         self._emit(HistoryTable.DEVICE, output.devices)
         self._emit(HistoryTable.CUSTOMER_DEVICE, output.device_links)
+        self._emit(HistoryTable.SIM_SWAP_EVENT, output.sim_swaps)
         self._emit(HistoryTable.BENEFICIARY, output.beneficiaries)
         self._emit(HistoryTable.BENEFICIARY_EVENT, output.beneficiary_events)
         transactions, normal = self._settle(output.planned)
@@ -439,6 +456,11 @@ class _Simulation:
         for event in plan.events_by_day.get(day, []):
             if isinstance(event, NewPhone):
                 self._new_phone(plan, customer, event, output)
+            elif isinstance(event, SimSwap):
+                swap = notify_sim_swap(
+                    self._rng, self._event_ids.sim_swaps, customer, plan.network, event.swapped_at
+                )
+                output.sim_swaps.append(swap)
             elif isinstance(event, BigPurchase):
                 card = _card_for_big_purchase(plan.cards)
                 draft = big_purchase_draft(
