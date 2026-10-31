@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from sentinel.domain.balance_enquiries import BalanceEnquiry
@@ -215,3 +216,48 @@ def test_normal_logins_and_sim_swaps_get_clean_labels() -> None:
     for label in (session_label, swap_label):
         assert not label.is_fraud
         assert (label.fraud_type, label.scenario_id, label.reported_at) == (None, None, None)
+
+
+def test_a_sweep_between_the_victims_own_accounts_is_not_counted_as_stolen() -> None:
+    def transfer_leg(number: int, account_id: str, direction: Direction) -> Transaction:
+        leg = replace(
+            draft(5, 0),
+            account_id=account_id,
+            direction=direction,
+            channel=Channel.INTERNAL_TRANSFER,
+            auth_method=TransactionAuthMethod.OTP,
+            transfer_group_id="TRF-000000001",
+            counterparty_account_id="ACC-0000009",
+            session_id="SES-0000001",
+            card_id=None,
+            merchant_id=None,
+            entry_mode=None,
+        )
+        return to_transaction(leg, number, APPROVED)
+
+    payout = to_transaction(
+        replace(
+            draft(3, 2),
+            channel=Channel.EFT,
+            auth_method=TransactionAuthMethod.OTP,
+            beneficiary_id="BEN-0000001",
+            session_id="SES-0000001",
+            card_id=None,
+            merchant_id=None,
+            entry_mode=None,
+        ),
+        3,
+        APPROVED,
+    )
+    truth = GroundTruth()
+    truth.add_episode(episode("SCN-0000001"), REPORTED_AT)
+    swept = [
+        transfer_leg(1, "ACC-0000002", Direction.DEBIT),
+        transfer_leg(2, "ACC-0000001", Direction.CREDIT),
+    ]
+    truth.record("SCN-0000001", [*swept, payout])
+
+    rows = truth.finish()
+
+    assert rows.scenarios[0].total_amount_cents == 30_000  # only the payout left the victim
+    assert len(rows.transaction_labels) == 3  # the sweep is still fraud

@@ -27,6 +27,8 @@ from sentinel.simulator.payments import (
     DayPayments,
     PaymentHabits,
     PaymentIds,
+    own_transfer,
+    payee_payment,
     payment_activity,
     plan_payment_habits,
 )
@@ -282,3 +284,47 @@ def test_same_seed_gives_the_same_payments(
     sample: list[tuple[Customer, PaymentHabits]],
 ) -> None:
     assert simulate_month(sample[:10], seed=4) == simulate_month(sample[:10], seed=4)
+
+
+def test_a_payee_can_be_paid_by_a_chosen_channel(
+    sample: list[tuple[Customer, PaymentHabits]], sessions_by_id: dict[str, LoginSession]
+) -> None:
+    customer, habits = next((c, h) for c, h in sample if h.beneficiaries)
+    session = next(s for s in sessions_by_id.values() if s.customer_id == customer.customer_id)
+    payee = habits.beneficiaries[0]
+    paid_at = session.started_at + timedelta(minutes=1)
+    amount = (
+        habits.main_account.payshap_daily_limit_cents
+    )  # big enough that pay_payee might use EFT
+
+    for channel in (Channel.PAYSHAP, Channel.EFT):
+        payment = payee_payment(habits.main_account, session, payee, amount, paid_at, channel)
+        assert payment.debit.channel is channel
+        assert payment.debit.beneficiary_id == payee.beneficiary_id
+        assert payment.debit.session_id == session.session_id
+        assert (payment.credit is None) == (payee.payee_internal_account_id is None)
+
+
+def test_own_transfers_can_go_between_any_two_own_accounts(
+    sample: list[tuple[Customer, PaymentHabits]], sessions_by_id: dict[str, LoginSession]
+) -> None:
+    customer, habits = next((c, h) for c, h in sample if h.savings_account is not None)
+    assert habits.savings_account is not None
+    session = next(s for s in sessions_by_id.values() if s.customer_id == customer.customer_id)
+    moved_at = session.started_at + timedelta(minutes=1)
+    groups = IdSequence("TRF", digits=9)
+
+    payment = own_transfer(
+        groups, session, habits.savings_account, habits.main_account, 50_000, moved_at
+    )
+
+    debit, credit = payment.debit, payment.credit
+    assert credit is not None
+    assert (debit.account_id, credit.account_id) == (
+        habits.savings_account.account_id,
+        habits.main_account.account_id,
+    )
+    assert debit.transfer_group_id == credit.transfer_group_id == "TRF-000000001"
+    assert debit.event_time == credit.event_time == moved_at
+    for draft in (debit, credit):
+        to_transaction(draft, 1, APPROVED)

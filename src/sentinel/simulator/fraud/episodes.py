@@ -30,6 +30,7 @@ class Victim:
     cards: tuple[Card, ...]
     payments: PaymentHabits
     favourite_atms: tuple[Merchant, ...]
+    network: str  # the mobile network a fraudster asks to swap the SIM
 
 
 @dataclass(slots=True)

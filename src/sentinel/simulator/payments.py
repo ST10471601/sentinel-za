@@ -161,8 +161,19 @@ def pay_payee(
         and amount_cents <= habits.main_account.payshap_daily_limit_cents
     )
     channel = Channel.PAYSHAP if use_payshap else Channel.EFT
-    payer_id = habits.main_account.account_id
+    return payee_payment(habits.main_account, session, payee, amount_cents, event_time, channel)
 
+
+def payee_payment(
+    account: Account,
+    session: LoginSession,
+    payee: Beneficiary,
+    amount_cents: int,
+    event_time: datetime,
+    channel: Channel,
+) -> PlannedPayment:
+    """Pay a saved payee from ``account`` by EFT or PayShap, within an open login session."""
+    payer_id = account.account_id
     debit = TransactionDraft(
         account_id=payer_id,
         direction=Direction.DEBIT,
@@ -214,16 +225,24 @@ def _add_own_transfers(
     session = _log_in(payer, pick_event_time(rng, day))
     activity.sessions.append(session)
     for target, amount in amounts:
-        activity.payments.append(_own_transfer(payer, session, target, amount))
+        event_time = _after_login(rng, session)
+        transfer = own_transfer(
+            payer.ids.transfer_groups, session, habits.main_account, target, amount, event_time
+        )
+        activity.payments.append(transfer)
 
 
-def _own_transfer(
-    payer: _Payer, session: LoginSession, target: Account, amount_cents: int
+def own_transfer(
+    transfer_groups: IdSequence,
+    session: LoginSession,
+    source: Account,
+    target: Account,
+    amount_cents: int,
+    event_time: datetime,
 ) -> PlannedPayment:
     """Both legs of a transfer between two of the customer's own accounts."""
-    group_id = payer.ids.transfer_groups.next_id()
-    event_time = _after_login(payer.rng, session)
-    source_id = payer.habits.main_account.account_id
+    group_id = transfer_groups.next_id()
+    source_id = source.account_id
 
     def leg(account_id: str, direction: Direction, other_id: str) -> TransactionDraft:
         return TransactionDraft(

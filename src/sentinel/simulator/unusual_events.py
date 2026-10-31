@@ -340,11 +340,26 @@ def add_and_pay_new_payee(
     devices = devices_linked_by(habits.devices, logged_in_at)
     session = start_session(rng, ids.sessions, customer, devices, logged_in_at)
     saved_at = _seconds_after(rng, logged_in_at, ADD_PAYEE_DELAY_SECONDS)
+    name = rng.choice(NEW_PAYEE_NAMES)
+    beneficiary, created = save_new_payee(rng, ids, customer, name, session, saved_at)
+    paid_at = _seconds_after(rng, saved_at, PAY_NEW_PAYEE_DELAY_SECONDS)
+    payment = pay_payee(rng, customer, habits, session, beneficiary, amount, paid_at)
+    return PayeeChange(beneficiary, created, session, payment)
 
+
+def save_new_payee(
+    rng: random.Random,
+    ids: EventIds,
+    customer: Customer,
+    name: str,
+    session: LoginSession,
+    saved_at: datetime,
+) -> tuple[Beneficiary, BeneficiaryEvent]:
+    """Save a payee at another bank in an open login session, and the event that records it."""
     beneficiary = Beneficiary(
         beneficiary_id=ids.beneficiaries.next_id(),
         customer_id=customer.customer_id,
-        beneficiary_name=rng.choice(NEW_PAYEE_NAMES),
+        beneficiary_name=name,
         payee_bank=rng.choice(OTHER_BANKS),
         payee_account_number=make_account_number(rng),
         payee_internal_account_id=None,
@@ -360,9 +375,7 @@ def add_and_pay_new_payee(
         old_account_number=None,
         new_account_number=beneficiary.payee_account_number,
     )
-    paid_at = _seconds_after(rng, saved_at, PAY_NEW_PAYEE_DELAY_SECONDS)
-    payment = pay_payee(rng, customer, habits, session, beneficiary, amount, paid_at)
-    return PayeeChange(beneficiary, created, session, payment)
+    return beneficiary, created
 
 
 def _plan_trip(
