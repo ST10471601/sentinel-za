@@ -8,9 +8,13 @@ from typing import Protocol
 
 from sentinel.core.datetimes import to_sast
 from sentinel.domain.accounts import Card
+from sentinel.domain.beneficiaries import Beneficiary, BeneficiaryEvent
 from sentinel.domain.customers import Customer
+from sentinel.domain.devices import CustomerDevice, Device
 from sentinel.domain.labels import FraudType
 from sentinel.domain.merchants import Merchant
+from sentinel.domain.sessions import LoginSession
+from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.simulator.drafts import EnquiryDraft, TransactionDraft
 from sentinel.simulator.payments import PaymentHabits, PlannedPayment
 
@@ -30,10 +34,19 @@ class Victim:
 
 @dataclass(slots=True)
 class FraudActions:
-    """What a fraudster does on one day, plus any of the victim's own transactions it needs."""
+    """What a fraudster does on one day, plus any of the victim's own transactions it needs.
+
+    Identity events (SIM swaps, devices, logins, payees) are all the fraudster's.
+    """
 
     attempts: list[FraudAction] = field(default_factory=list)
     genuine: list[TransactionDraft] = field(default_factory=list)  # labelled not fraud
+    sim_swaps: list[SimSwapEvent] = field(default_factory=list)
+    devices: list[Device] = field(default_factory=list)
+    device_links: list[CustomerDevice] = field(default_factory=list)
+    sessions: list[LoginSession] = field(default_factory=list)
+    beneficiaries: list[Beneficiary] = field(default_factory=list)
+    beneficiary_events: list[BeneficiaryEvent] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)

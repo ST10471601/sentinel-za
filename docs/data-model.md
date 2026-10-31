@@ -125,6 +125,10 @@ erDiagram
     TRANSACTION ||--|| TRANSACTION_LABEL : "truth for"
     SCENARIO_INSTANCE ||--o{ BALANCE_ENQUIRY_LABEL : produces
     BALANCE_ENQUIRY ||--|| BALANCE_ENQUIRY_LABEL : "truth for"
+    SCENARIO_INSTANCE ||--o{ LOGIN_SESSION_LABEL : produces
+    LOGIN_SESSION ||--|| LOGIN_SESSION_LABEL : "truth for"
+    SCENARIO_INSTANCE ||--o{ SIM_SWAP_LABEL : produces
+    SIM_SWAP_EVENT ||--|| SIM_SWAP_LABEL : "truth for"
     ACCOUNT ||--o| ACCOUNT_LABEL : "truth for"
 
     TRANSACTION_SCORE {
@@ -164,6 +168,16 @@ erDiagram
         bool is_fraud
         string scenario_id FK
     }
+    LOGIN_SESSION_LABEL {
+        string session_id PK
+        bool is_fraud
+        string scenario_id FK
+    }
+    SIM_SWAP_LABEL {
+        string sim_swap_id PK
+        bool is_fraud
+        string scenario_id FK
+    }
     ACCOUNT_LABEL {
         string account_id PK
         bool is_mule
@@ -189,8 +203,8 @@ Each file's metadata records the seed and simulation start that produced it.
 writes the reference data, then `transaction`, `balance_enquiry`, `login_session`, `beneficiary`,
 `beneficiary_event`, `card_event`, `sim_swap_event`, and the `device`, `customer_device` and `card` rows added during the period to `data/history/`.
 Fraud is injected into the same day-by-day run, so stolen money really leaves balances.
-The ground truth (`scenario_instance`, `transaction_label`, `balance_enquiry_label`) goes to
-`data/truth/`, apart from what the bank can observe. Rows are written in batches, so memory stays flat however long the run.
+The ground truth (`scenario_instance`, `transaction_label`, `balance_enquiry_label`,
+`login_session_label`, `sim_swap_label`) goes to `data/truth/`, apart from what the bank can observe. Rows are written in batches, so memory stays flat however long the run.
 
 **Event streams (through the broker):**
 
@@ -513,6 +527,29 @@ Added to every bronze row by the ingestion consumer.
 | Column | Type | Description |
 |---|---|---|
 | balance_enquiry_id | string | PK, FK → balance_enquiry |
+| is_fraud | bool | |
+| fraud_type | string | Nullable |
+| scenario_id | string | FK → scenario_instance (nullable) |
+| reported_at | timestamp | Same as the episode's transaction labels |
+
+**login_session_label** (one per login session, fraud or not)
+
+| Column | Type | Description |
+|---|---|---|
+| session_id | string | PK, FK → login_session |
+| is_fraud | bool | |
+| fraud_type | string | Nullable |
+| scenario_id | string | FK → scenario_instance (nullable) |
+| reported_at | timestamp | Same as the episode's transaction labels |
+
+Devices and payees have no label tables. A fraudster's device joins to fraud through
+`login_session.device_id`, and a payee through `beneficiary_event.session_id`.
+
+**sim_swap_label** (one per SIM swap, fraud or not)
+
+| Column | Type | Description |
+|---|---|---|
+| sim_swap_id | string | PK, FK → sim_swap_event |
 | is_fraud | bool | |
 | fraud_type | string | Nullable |
 | scenario_id | string | FK → scenario_instance (nullable) |

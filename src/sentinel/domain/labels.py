@@ -16,6 +16,8 @@ from sentinel.domain.accounts import AccountId
 from sentinel.domain.balance_enquiries import BalanceEnquiryId
 from sentinel.domain.base import Cents, DomainModel
 from sentinel.domain.customers import CustomerId
+from sentinel.domain.sessions import SessionId
+from sentinel.domain.sim_swaps import SimSwapId
 from sentinel.domain.transactions import TransactionId
 
 ScenarioId = Annotated[str, Field(pattern=r"^SCN-\d{7}$")]
@@ -107,6 +109,42 @@ class BalanceEnquiryLabel(DomainModel):
     @model_validator(mode="after")
     def check_fraud_fields(self) -> Self:
         """Fraud needs a type and scenario; normal enquiries have no fraud fields."""
+        _check_fraud_fields(self.is_fraud, self.fraud_type, self.scenario_id, self.reported_at)
+        return self
+
+
+class LoginSessionLabel(DomainModel):
+    """Whether a login session was a fraudster's. Every session gets a label.
+
+    Devices and payees have no labels of their own: they join to fraud through the session
+    that registered or saved them.
+    """
+
+    session_id: SessionId
+    is_fraud: bool
+    fraud_type: FraudType | None
+    scenario_id: ScenarioId | None
+    reported_at: UtcDatetime | None
+
+    @model_validator(mode="after")
+    def check_fraud_fields(self) -> Self:
+        """Fraud needs a type and scenario; normal sessions have no fraud fields."""
+        _check_fraud_fields(self.is_fraud, self.fraud_type, self.scenario_id, self.reported_at)
+        return self
+
+
+class SimSwapLabel(DomainModel):
+    """Whether a SIM swap was done by a fraudster. Every swap gets a label."""
+
+    sim_swap_id: SimSwapId
+    is_fraud: bool
+    fraud_type: FraudType | None
+    scenario_id: ScenarioId | None
+    reported_at: UtcDatetime | None
+
+    @model_validator(mode="after")
+    def check_fraud_fields(self) -> Self:
+        """Fraud needs a type and scenario; normal swaps have no fraud fields."""
         _check_fraud_fields(self.is_fraud, self.fraud_type, self.scenario_id, self.reported_at)
         return self
 

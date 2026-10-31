@@ -2,7 +2,10 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from sentinel.domain.balance_enquiries import BalanceEnquiry
-from sentinel.domain.labels import FraudType
+from sentinel.domain.customers import BankingChannel
+from sentinel.domain.labels import FraudType, LoginSessionLabel, SimSwapLabel
+from sentinel.domain.sessions import LoginSession, SessionAuthMethod
+from sentinel.domain.sim_swaps import SimSwapEvent
 from sentinel.domain.transactions import (
     Channel,
     DeclineReason,
@@ -24,6 +27,8 @@ from sentinel.simulator.fraud.ground_truth import (
     GroundTruth,
     normal_enquiry_label,
     normal_labels,
+    normal_session_labels,
+    normal_sim_swap_labels,
 )
 
 START = datetime(2026, 2, 3, 20, 0, tzinfo=UTC)
@@ -61,6 +66,33 @@ def enquiry(number: int, minutes: int) -> BalanceEnquiry:
         terminal_lon=28.0,
     )
     return to_balance_enquiry(draft, number, APPROVED)
+
+
+def session(number: int, minutes: int) -> LoginSession:
+    return LoginSession(
+        session_id=f"SES-{number:07d}",
+        customer_id="CUS-0000001",
+        device_id="DEV-0000009",
+        channel=BankingChannel.APP,
+        started_at=START + timedelta(minutes=minutes),
+        auth_method=SessionAuthMethod.OTP,
+        ip_country="ZA",
+        lat=None,
+        lon=None,
+        remote_access_detected=False,
+    )
+
+
+def sim_swap(number: int, minutes: int) -> SimSwapEvent:
+    swapped_at = START + timedelta(minutes=minutes)
+    return SimSwapEvent(
+        sim_swap_id=f"SIM-{number:07d}",
+        customer_id="CUS-0000001",
+        phone_number="+27821234567",
+        swapped_at=swapped_at,
+        notified_at=swapped_at + timedelta(hours=3),
+        network="MNO-1",
+    )
 
 
 def episode(scenario_id: str) -> ScriptedEpisode:
@@ -144,3 +176,42 @@ def test_normal_balance_checks_get_clean_labels() -> None:
     label = normal_enquiry_label(enquiry(1, 0))
     assert not label.is_fraud
     assert (label.fraud_type, label.scenario_id, label.reported_at) == (None, None, None)
+
+
+def test_a_fraudsters_logins_and_sim_swaps_share_the_episodes_report() -> None:
+    truth = GroundTruth()
+    truth.add_episode(episode("SCN-0000001"), REPORTED_AT)
+    truth.record_sim_swaps("SCN-0000001", [sim_swap(1, -30)])
+    truth.record_sessions("SCN-0000001", [session(1, -20), session(2, -5)])
+    truth.record("SCN-0000001", [transaction(1, 0)])
+
+    rows = truth.finish()
+
+    assert rows.scenarios[0].started_at == START - timedelta(minutes=30)  # starts at the swap
+    labels: list[LoginSessionLabel | SimSwapLabel] = [*rows.session_labels, *rows.sim_swap_labels]
+    assert [label.session_id for label in rows.session_labels] == ["SES-0000001", "SES-0000002"]
+    assert [label.sim_swap_id for label in rows.sim_swap_labels] == ["SIM-0000001"]
+    for label in labels:
+        assert (label.is_fraud, label.fraud_type) == (True, FraudType.CARD_NOT_PRESENT)
+        assert (label.scenario_id, label.reported_at) == ("SCN-0000001", REPORTED_AT)
+
+
+def test_an_episode_cut_off_after_its_sim_swap_is_still_summarised() -> None:
+    truth = GroundTruth()
+    truth.add_episode(episode("SCN-0000001"), REPORTED_AT)
+    truth.record_sim_swaps("SCN-0000001", [sim_swap(1, 0)])
+
+    (instance,) = truth.finish().scenarios
+
+    assert instance.started_at == instance.ended_at == START
+    assert instance.total_amount_cents == 0
+
+
+def test_normal_logins_and_sim_swaps_get_clean_labels() -> None:
+    (session_label,) = normal_session_labels([session(1, 0)])
+    (swap_label,) = normal_sim_swap_labels([sim_swap(1, 0)])
+
+    assert (session_label.session_id, swap_label.sim_swap_id) == ("SES-0000001", "SIM-0000001")
+    for label in (session_label, swap_label):
+        assert not label.is_fraud
+        assert (label.fraud_type, label.scenario_id, label.reported_at) == (None, None, None)
