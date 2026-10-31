@@ -64,6 +64,13 @@ from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan
 from sentinel.simulator.fraud.reports import plan_card_block, plan_reported_at
 from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.ledger import Ledger
+from sentinel.simulator.payee_changes import (
+    PayeeDeletion,
+    PayeeDetailsChange,
+    change_payee_details,
+    delete_payee,
+    plan_payee_changes,
+)
 from sentinel.simulator.payments import (
     PaymentHabits,
     PaymentIds,
@@ -79,7 +86,11 @@ from sentinel.simulator.recurring import (
     recurring_drafts,
 )
 from sentinel.simulator.reference_data import ReferenceData
-from sentinel.simulator.sessions import LinkedDevice, group_devices_by_customer
+from sentinel.simulator.sessions import (
+    LinkedDevice,
+    group_devices_by_customer,
+    note_remote_access,
+)
 from sentinel.simulator.spending import activity_weight, last_pay_date
 from sentinel.simulator.unusual_events import (
     NETWORK_SHARES,
@@ -97,6 +108,7 @@ from sentinel.simulator.unusual_events import (
     big_purchase_draft,
     notify_sim_swap,
     plan_new_browsers,
+    plan_person_payees,
     plan_sim_swaps,
     plan_unusual_events,
     register_new_browser,
@@ -106,7 +118,12 @@ from sentinel.simulator.unusual_events import (
 
 TRANSACTION_ID_DIGITS = 9
 
-type DayEvent = BigPurchase | NewPhone | NewBrowser | NewPayee | SimSwap  # on a single day
+# Events on a single day.
+type DayEvent = (
+    BigPurchase | NewPhone | NewBrowser | NewPayee | SimSwap | PayeeDetailsChange | PayeeDeletion
+)
+type IdentityEvent = NewPhone | NewBrowser | SimSwap
+type PayeeEvent = NewPayee | PayeeDetailsChange | PayeeDeletion
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +291,9 @@ class _Simulation:
         cards = _group(reference.cards, lambda c: owner[c.account_id])
         devices = group_devices_by_customer(reference.devices, reference.customer_devices)
 
+        self._remote_access_rng = make_rng(reference.seed, "remote-access")
+        self._customer_types = {c.customer_id: c.customer_type for c in reference.customers}
+
         # Payees saved before the start, each in its own login session.
         session_ids = IdSequence("SES")
         payees = generate_beneficiaries(
@@ -284,8 +304,9 @@ class _Simulation:
             session_ids,
             reference.simulation_start,
         )
-        self._emit(HistoryTable.LOGIN_SESSION, payees.sessions)
-        self._emit(HistoryTable.LOGIN_SESSION_LABEL, normal_session_labels(payees.sessions))
+        payee_sessions = self._note_remote_access(payees.sessions)
+        self._emit(HistoryTable.LOGIN_SESSION, payee_sessions)
+        self._emit(HistoryTable.LOGIN_SESSION_LABEL, normal_session_labels(payee_sessions))
         self._emit(HistoryTable.BENEFICIARY, payees.beneficiaries)
         self._emit(HistoryTable.BENEFICIARY_EVENT, payees.events)
 
@@ -303,6 +324,8 @@ class _Simulation:
         plan_rng = make_rng(reference.seed, "plans")
         self._swap_rng = make_rng(reference.seed, "sim-swaps")
         self._browser_rng = make_rng(reference.seed, "new-browsers")
+        self._person_payee_rng = make_rng(reference.seed, "person-payees")
+        self._payee_change_rng = make_rng(reference.seed, "payee-changes")
         day_count = (self._last_day - self._first_day).days + 1
         self._plans = [
             self._plan_customer(
@@ -402,14 +425,19 @@ class _Simulation:
     ) -> _CustomerPlan:
         recurring = plan_recurring(rng, customer, find_main_account(accounts))
         network = pick(self._swap_rng, NETWORK_SHARES)
-        events = plan_unusual_events(rng, customer, self._first_day, day_count)
-        events += plan_sim_swaps(self._swap_rng, customer, self._first_day, day_count)
+        first_day = self._first_day
+        events = plan_unusual_events(rng, customer, first_day, day_count)
+        events += plan_sim_swaps(self._swap_rng, customer, first_day, day_count)
         if any(item.device.platform is DevicePlatform.WEB for item in devices):
-            events += plan_new_browsers(self._browser_rng, self._first_day, day_count)
+            events += plan_new_browsers(self._browser_rng, first_day, day_count)
+        events += plan_person_payees(self._person_payee_rng, customer, first_day, day_count)
+        day_events: list[DayEvent] = [event for event in events if not isinstance(event, Trip)]
+        day_events += plan_payee_changes(
+            self._payee_change_rng, customer, payees, first_day, day_count
+        )
         events_by_day: dict[date, list[DayEvent]] = defaultdict(list)
-        for event in events:
-            if not isinstance(event, Trip):
-                events_by_day[event.day].append(event)
+        for event in day_events:
+            events_by_day[event.day].append(event)
 
         return _CustomerPlan(
             customer=customer,
@@ -435,8 +463,9 @@ class _Simulation:
             output.planned += [_FraudAttempt(episode.scenario_id, a) for a in actions.attempts]
             self._emit_identity_events(episode.scenario_id, actions)
 
-        self._emit(HistoryTable.LOGIN_SESSION, output.sessions)
-        self._emit(HistoryTable.LOGIN_SESSION_LABEL, normal_session_labels(output.sessions))
+        sessions = self._note_remote_access(output.sessions)
+        self._emit(HistoryTable.LOGIN_SESSION, sessions)
+        self._emit(HistoryTable.LOGIN_SESSION_LABEL, normal_session_labels(sessions))
         self._emit(HistoryTable.DEVICE, output.devices)
         self._emit(HistoryTable.CUSTOMER_DEVICE, output.device_links)
         self._emit(HistoryTable.SIM_SWAP_EVENT, output.sim_swaps)
@@ -508,17 +537,8 @@ class _Simulation:
         customer = away_customer(plan.customer, trip.city) if trip else plan.customer
 
         for event in plan.events_by_day.get(day, []):
-            if isinstance(event, NewPhone):
-                change = register_new_phone(self._rng, customer, event, self._event_ids)
-                self._add_device(plan, change, output)
-            elif isinstance(event, NewBrowser):
-                change = register_new_browser(self._rng, customer, event, self._event_ids)
-                self._add_device(plan, change, output)
-            elif isinstance(event, SimSwap):
-                swap = notify_sim_swap(
-                    self._rng, self._event_ids.sim_swaps, customer, plan.network, event.swapped_at
-                )
-                output.sim_swaps.append(swap)
+            if isinstance(event, NewPhone | NewBrowser | SimSwap):
+                self._identity_event(plan, customer, event, output)
             elif isinstance(event, BigPurchase):
                 card = _card_for_big_purchase(plan.cards)
                 draft = big_purchase_draft(
@@ -527,8 +547,44 @@ class _Simulation:
                 if draft is not None:
                     output.planned.append(draft)
             else:
-                self._new_payee(plan, customer, event, budget, output)
+                self._payee_event(plan, customer, event, budget, output)
         return customer
+
+    def _identity_event(
+        self, plan: _CustomerPlan, customer: Customer, event: IdentityEvent, output: _DayOutput
+    ) -> None:
+        """Register a new phone or browser, or pass on the network's notice of a SIM swap."""
+        if isinstance(event, SimSwap):
+            swap = notify_sim_swap(
+                self._rng, self._event_ids.sim_swaps, customer, plan.network, event.swapped_at
+            )
+            output.sim_swaps.append(swap)
+            return
+        if isinstance(event, NewPhone):
+            change = register_new_phone(self._rng, customer, event, self._event_ids)
+        else:
+            change = register_new_browser(self._rng, customer, event, self._event_ids)
+        self._add_device(plan, change, output)
+
+    def _payee_event(
+        self,
+        plan: _CustomerPlan,
+        customer: Customer,
+        event: PayeeEvent,
+        budget: DayBudget,
+        output: _DayOutput,
+    ) -> None:
+        """Save and pay new payees, or change or delete a saved one."""
+        if isinstance(event, NewPayee):
+            self._new_payee(plan, customer, event, budget, output)
+            return
+        edit_payee = change_payee_details if isinstance(event, PayeeDetailsChange) else delete_payee
+        edit = edit_payee(self._rng, customer, plan.payments, self._event_ids, event.day)
+        if edit is None:
+            return
+        plan.payments = replace(plan.payments, beneficiaries=edit.payees)
+        output.beneficiary_events.append(edit.event)
+        output.sessions.append(edit.session)
 
     def _add_device(self, plan: _CustomerPlan, change: DeviceChange, output: _DayOutput) -> None:
         """The new device is on the profile from now on, so later logins can use it."""
@@ -546,16 +602,25 @@ class _Simulation:
         budget: DayBudget,
         output: _DayOutput,
     ) -> None:
-        # The new payee is a once-off, so it isn't added to the customer's regular payees.
         change = add_and_pay_new_payee(
-            self._rng, customer, event, plan.payments, self._event_ids, budget
+            self._rng,
+            customer,
+            event,
+            plan.payments,
+            self._event_ids,
+            budget,
+            self._payment_ids.transfer_groups,
         )
         if change is None:
             return
-        output.beneficiaries.append(change.beneficiary)
-        output.beneficiary_events.append(change.event)
+        output.beneficiaries += change.beneficiaries
+        output.beneficiary_events += change.events
         output.sessions.append(change.session)
-        output.planned.append(change.payment)
+        output.planned += change.payments
+        # People are paid again later; a once-off bill isn't.
+        if event.is_person:
+            payees = (*plan.payments.beneficiaries, *change.beneficiaries)
+            plan.payments = replace(plan.payments, beneficiaries=payees)
 
     def _card_habits_for(self, plan: _CustomerPlan, trip: Trip | None) -> CardHabits:
         """Usual habits at home; on a trip, favourite shops in the destination city."""
@@ -569,7 +634,8 @@ class _Simulation:
     def _budget(self, plan: _CustomerPlan, scheduled: list[TransactionDraft]) -> DayBudget:
         """Start from what each account has, plus income landing today."""
         habits = plan.payments
-        accounts = [a for a in (habits.main_account, habits.credit_account) if a is not None]
+        own = (habits.main_account, habits.savings_account, habits.credit_account)
+        accounts = [account for account in own if account is not None]
         available = {a.account_id: self._ledger.available_cents(a.account_id) for a in accounts}
         for draft in scheduled:
             if draft.direction is Direction.CREDIT and draft.account_id in available:
@@ -636,6 +702,11 @@ class _Simulation:
             self._declined_count += 1
         self._transaction_count += 1
         return to_transaction(draft, self._transaction_count, settlement)
+
+    def _note_remote_access(self, sessions: Sequence[LoginSession]) -> list[LoginSession]:
+        """Genuine logins as the bank sees them, a few with screen-sharing software running."""
+        rng, types = self._remote_access_rng, self._customer_types
+        return [note_remote_access(rng, s, types[s.customer_id]) for s in sessions]
 
     def _emit(self, table: HistoryTable, rows: Sequence[DomainModel]) -> None:
         if rows:

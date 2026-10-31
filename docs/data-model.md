@@ -346,7 +346,7 @@ fraud or not.
 | auth_method | string | | `password`, `biometric`, `otp`, `pin` |
 | ip_country | string | | ISO country code (null for USSD) |
 | lat, lon | double | | Approximate location (nullable) |
-| remote_access_detected | bool | | App detected screen-sharing software running |
+| remote_access_detected | bool | | App or browser detected screen-sharing software running. A few genuine sessions have it too (a relative or IT support helping) |
 
 ### merchant
 
@@ -369,7 +369,8 @@ advertising `7311`, travel agency `4722`, betting `7995`, crypto / quasi-cash `6
 
 ### beneficiary
 
-Current state of each saved payee. Full history is in `beneficiary_event`.
+Each saved payee as it was first saved. Later details changes and deletions are only in
+`beneficiary_event`; `dim_beneficiary` rebuilds each version from them.
 
 | Column | Type | PII | Description |
 |---|---|---|---|
@@ -384,7 +385,9 @@ Current state of each saved payee. Full history is in `beneficiary_event`.
 
 ### beneficiary_event
 
-Captures supplier-mandate fraud: a payee's bank details change, then a large payment follows.
+Captures supplier-mandate fraud: a payee's bank details change, then a payment follows. Customers
+also change and delete payees for genuine reasons, mostly businesses' suppliers, so a change on its
+own is not fraud. Each change is made in its own login session.
 
 | Column | Type | PII | Description |
 |---|---|---|---|
