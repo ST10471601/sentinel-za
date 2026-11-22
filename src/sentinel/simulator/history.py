@@ -62,6 +62,7 @@ from sentinel.simulator.fraud.ground_truth import (
     normal_sim_swap_labels,
 )
 from sentinel.simulator.fraud.lost_stolen import LostStolen
+from sentinel.simulator.fraud.payshap_drain import PayShapDrain
 from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
 from sentinel.simulator.fraud.reports import plan_card_block, plan_reported_at
 from sentinel.simulator.identifiers import IdSequence
@@ -258,6 +259,7 @@ def fraud_scenarios(
         AccountTakeover(ids, transfer_groups),
         AppScam(FraudType.APP_VISHING, ids, transfer_groups),
         AppScam(FraudType.APP_REMOTE_ACCESS, ids, transfer_groups),
+        PayShapDrain(ids, transfer_groups),
     ]
 
 
