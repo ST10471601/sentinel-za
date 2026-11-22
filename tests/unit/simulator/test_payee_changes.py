@@ -190,3 +190,23 @@ def test_nothing_is_changed_without_a_payee_to_change(
         delete_payee(generator, customer, replace(habits, beneficiaries=()), event_ids(), DAY)
         is None
     )
+
+
+def test_payees_a_fraud_episode_holds_are_never_changed_or_deleted(
+    business: tuple[Customer, PaymentHabits],
+) -> None:
+    customer, habits = business
+    supplier = elsewhere(habits.beneficiaries)[0]
+    everyone = {payee.beneficiary_id for payee in habits.beneficiaries}
+    held = everyone - {supplier.beneficiary_id}
+    generator = random.Random(9)
+
+    for _ in range(20):
+        changed = change_payee_details(generator, customer, habits, event_ids(), DAY, held)
+        deleted = delete_payee(generator, customer, habits, event_ids(), DAY, held)
+        assert changed is not None
+        assert deleted is not None
+        assert changed.event.beneficiary_id == supplier.beneficiary_id
+        assert deleted.event.beneficiary_id == supplier.beneficiary_id
+    assert change_payee_details(generator, customer, habits, event_ids(), DAY, everyone) is None
+    assert delete_payee(generator, customer, habits, event_ids(), DAY, everyone) is None

@@ -5,7 +5,7 @@ changes keep that shape from being fraud-only. Each change is made in its own lo
 """
 
 import random
-from collections.abc import Sequence
+from collections.abc import Container, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -74,28 +74,30 @@ def plan_payee_changes(
 
 
 def change_payee_details(
-    rng: random.Random, customer: Customer, habits: PaymentHabits, ids: EventIds, day: date
+    rng: random.Random,
+    customer: Customer,
+    habits: PaymentHabits,
+    ids: EventIds,
+    day: date,
+    held: Container[str] = frozenset(),
 ) -> PayeeEdit | None:
     """Give a saved payee at another bank a new account number.
 
-    Later payments carry on to the same payee. Returns None when no payee banks elsewhere.
+    Later payments carry on to the same payee. Payees in ``held`` are left alone. Returns None
+    when no other payee banks elsewhere.
     """
-    elsewhere = [p for p in habits.beneficiaries if p.payee_internal_account_id is None]
+    elsewhere = [
+        p
+        for p in habits.beneficiaries
+        if p.payee_internal_account_id is None and p.beneficiary_id not in held
+    ]
     if not elsewhere:
         return None
     payee = rng.choice(elsewhere)
     session, changed_at = _log_in(rng, customer, habits, ids, day)
     old_number = payee.payee_account_number
     new_number = draw_unique(lambda: make_account_number(rng), {old_number})
-    event = BeneficiaryEvent(
-        beneficiary_event_id=ids.beneficiary_events.next_id(),
-        beneficiary_id=payee.beneficiary_id,
-        event_type=BeneficiaryEventType.DETAILS_CHANGED,
-        event_time=changed_at,
-        session_id=session.session_id,
-        old_account_number=old_number,
-        new_account_number=new_number,
-    )
+    event = details_changed(ids, payee.beneficiary_id, old_number, new_number, session, changed_at)
     changed = payee.model_copy(update={"payee_account_number": new_number})
     payees = tuple(
         changed if p.beneficiary_id == payee.beneficiary_id else p for p in habits.beneficiaries
@@ -104,12 +106,21 @@ def change_payee_details(
 
 
 def delete_payee(
-    rng: random.Random, customer: Customer, habits: PaymentHabits, ids: EventIds, day: date
+    rng: random.Random,
+    customer: Customer,
+    habits: PaymentHabits,
+    ids: EventIds,
+    day: date,
+    held: Container[str] = frozenset(),
 ) -> PayeeEdit | None:
-    """Remove a saved payee, which is never paid again. Returns None when none are left."""
-    if not habits.beneficiaries:
+    """Remove a saved payee, which is never paid again.
+
+    Payees in ``held`` are left alone. Returns None when no other payee is left.
+    """
+    candidates = [p for p in habits.beneficiaries if p.beneficiary_id not in held]
+    if not candidates:
         return None
-    payee = rng.choice(habits.beneficiaries)
+    payee = rng.choice(candidates)
     session, deleted_at = _log_in(rng, customer, habits, ids, day)
     event = BeneficiaryEvent(
         beneficiary_event_id=ids.beneficiary_events.next_id(),
@@ -122,6 +133,26 @@ def delete_payee(
     )
     payees = tuple(p for p in habits.beneficiaries if p.beneficiary_id != payee.beneficiary_id)
     return PayeeEdit(event, session, payees)
+
+
+def details_changed(
+    ids: EventIds,
+    beneficiary_id: str,
+    old_number: str,
+    new_number: str,
+    session: LoginSession,
+    changed_at: datetime,
+) -> BeneficiaryEvent:
+    """A saved payee given a new account number, within an open login."""
+    return BeneficiaryEvent(
+        beneficiary_event_id=ids.beneficiary_events.next_id(),
+        beneficiary_id=beneficiary_id,
+        event_type=BeneficiaryEventType.DETAILS_CHANGED,
+        event_time=changed_at,
+        session_id=session.session_id,
+        old_account_number=old_number,
+        new_account_number=new_number,
+    )
 
 
 def _log_in(

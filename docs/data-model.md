@@ -389,6 +389,11 @@ Captures supplier-mandate fraud: a payee's bank details change, then a payment f
 also change and delete payees for genuine reasons, mostly businesses' suppliers, so a change on its
 own is not fraud. Each change is made in its own login session.
 
+In supplier-mandate fraud the business makes the change itself, on its own device, after a fake
+email from the supplier, and that login is labelled fraud. Every payment to the payee from then
+until the business puts the real number back lands at the fraudster and is labelled fraud. The
+fix is a second `details_changed`, made in a genuine login when the fraud is reported.
+
 | Column | Type | PII | Description |
 |---|---|---|---|
 | beneficiary_event_id | string | | PK. `BEV-0000001` |
@@ -554,6 +559,10 @@ Added to every bronze row by the ingestion consumer.
 
 Devices and payees have no label tables. A fraudster's device joins to fraud through
 `login_session.device_id`, and a payee through `beneficiary_event.session_id`.
+
+A login is fraud when the fraudster drove it. In supplier-mandate fraud, payments the business
+makes for its own reasons to a redirected payee are fraud transactions in logins labelled not
+fraud.
 
 **sim_swap_label** (one per SIM swap, fraud or not)
 

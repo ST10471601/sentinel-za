@@ -71,6 +71,7 @@ INJECTED_FRAUD_TYPES = {
     FraudType.APP_VISHING,
     FraudType.APP_REMOTE_ACCESS,
     FraudType.PAYSHAP_DRAIN,
+    FraudType.SUPPLIER_MANDATE,
 }
 CARD_AND_PIN_FRAUD_TYPES = {FraudType.CARD_PRESENT_LOST_STOLEN, FraudType.CARD_PRESENT_COUNTERFEIT}
 BLOCK_EVENTS = {CardEventType.BLOCKED, CardEventType.REPORTED_LOST}
@@ -974,7 +975,7 @@ def look_alike_run(reference: ReferenceData) -> CollectedRows:
         patch.setattr(unusual_events, "NEW_PERSON_PAYEE_RATE", 1.0)
         patch.setattr(payments, "SAVINGS_WITHDRAWAL_RATE", 2.0)
         patch.setattr(payments, "CREDIT_CARD_TRANSFER_RATE", 2.0)
-        simulate_history(reference, MONTHS, sink)
+        simulate_history(reference, MONTHS, sink, FraudSettings(0.0))
     return sink
 
 
@@ -1112,3 +1113,85 @@ def test_customers_never_delete_more_payees_than_they_saved(reference: Reference
     deleted_by_customer = Counter(owner[payee] for payee in deleted)
     assert all(deleted_by_customer[c] <= saved[c] for c in saved)
     assert any(deleted_by_customer[c] == saved[c] for c in saved)  # some ran out of payees
+
+
+@pytest.fixture(scope="module")
+def mandate_run(reference: ReferenceData) -> CollectedRows:
+    """Mostly supplier mandate fraud over three months, all reported, so most get fixed."""
+    sink = CollectedRows()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(FRAUD_MIX, FraudType.SUPPLIER_MANDATE, 5.0)
+        simulate_history(reference, 3, sink, FraudSettings(300.0, unreported_share=0.0))
+    return sink
+
+
+def redirected_payees(rows: CollectedRows) -> dict[str, tuple[str, list[BeneficiaryEvent]]]:
+    """Each supplier mandate's payee: its scenario and every change to it, in time order."""
+    changes: dict[str, list[BeneficiaryEvent]] = defaultdict(list)
+    for event in rows.beneficiary_events():
+        if event.event_type is not BeneficiaryEventType.CREATED:
+            changes[event.beneficiary_id].append(event)
+    payees = {}
+    for scenario in rows.scenarios():
+        if scenario.fraud_type is FraudType.SUPPLIER_MANDATE:
+            payee_id = json.loads(scenario.params)["beneficiary_id"]
+            events = sorted(changes[payee_id], key=lambda e: e.event_time)
+            payees[payee_id] = (scenario.scenario_id, events)
+    return payees
+
+
+def test_a_mandate_changes_a_supplier_in_a_fraud_login_and_the_business_fixes_it_later(
+    mandate_run: CollectedRows,
+) -> None:
+    owner = {b.beneficiary_id: b.customer_id for b in mandate_run.beneficiaries()}
+    victim = {s.scenario_id: s.victim_customer_id for s in mandate_run.scenarios()}
+    labels = {label.session_id: label for label in mandate_run.session_labels()}
+    payees = redirected_payees(mandate_run)
+
+    fixed = 0
+    assert payees
+    for payee_id, (scenario_id, events) in payees.items():
+        change, *rest = events  # nothing genuine touches the payee in between
+        change_label = labels[change.session_id]
+        assert owner[payee_id] == victim[scenario_id]
+        assert change.event_type is BeneficiaryEventType.DETAILS_CHANGED
+        assert change_label.scenario_id == scenario_id
+        assert change_label.reported_at is not None
+        if rest:
+            (fix,) = rest
+            assert not labels[fix.session_id].is_fraud
+            assert fix.event_type is BeneficiaryEventType.DETAILS_CHANGED
+            assert fix.old_account_number == change.new_account_number
+            assert fix.new_account_number == change.old_account_number
+            assert fix.event_time > change_label.reported_at
+            fixed += 1
+    assert fixed
+
+
+def test_every_payment_to_a_redirected_supplier_until_the_fix_is_fraud(
+    mandate_run: CollectedRows,
+) -> None:
+    windows = {}
+    for payee_id, (scenario_id, events) in redirected_payees(mandate_run).items():
+        fixed_at = events[1].event_time if len(events) > 1 else None
+        windows[payee_id] = (scenario_id, events[0].event_time, fixed_at)
+    labels = {label.transaction_id: label for label in mandate_run.labels()}
+    is_fraud_session = mandate_run.is_fraud_session()
+
+    paid_by_type: Counter[tuple[bool, bool]] = Counter()
+    for transaction in mandate_run.transactions():
+        if transaction.beneficiary_id not in windows:
+            continue
+        scenario_id, changed_at, fixed_at = windows[transaction.beneficiary_id]
+        moment = transaction.event_time
+        redirected = changed_at <= moment and (fixed_at is None or moment < fixed_at)
+        label = labels[transaction.transaction_id]
+        assert label.is_fraud is redirected
+        assert label.scenario_id == (scenario_id if redirected else None)
+        assert transaction.session_id is not None
+        paid_by_type[redirected, is_fraud_session[transaction.session_id]] += 1
+
+    assert paid_by_type[True, True]  # the invoice the email asked for
+    assert paid_by_type[True, False]  # the business's own later payments
+    assert paid_by_type[False, False]  # paid to the real supplier before or after
+    assert not paid_by_type[False, True]
