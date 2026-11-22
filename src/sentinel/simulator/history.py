@@ -18,6 +18,7 @@ from sentinel.domain.customers import Customer
 from sentinel.domain.devices import CustomerDevice, Device, DevicePlatform
 from sentinel.domain.labels import (
     BalanceEnquiryLabel,
+    FraudType,
     LoginSessionLabel,
     ScenarioInstance,
     SimSwapLabel,
@@ -43,6 +44,7 @@ from sentinel.simulator.drafts import (
     to_transaction,
 )
 from sentinel.simulator.fraud.account_takeover import AccountTakeover
+from sentinel.simulator.fraud.app_scams import AppScam
 from sentinel.simulator.fraud.card_not_present import CardNotPresent
 from sentinel.simulator.fraud.counterfeit import Counterfeit
 from sentinel.simulator.fraud.episodes import (
@@ -254,6 +256,8 @@ def fraud_scenarios(
         LostStolen(merchants),
         Counterfeit(merchants),
         AccountTakeover(ids, transfer_groups),
+        AppScam(FraudType.APP_VISHING, ids, transfer_groups),
+        AppScam(FraudType.APP_REMOTE_ACCESS, ids, transfer_groups),
     ]
 
 
