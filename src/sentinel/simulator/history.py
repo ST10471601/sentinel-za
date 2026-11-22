@@ -65,6 +65,11 @@ from sentinel.simulator.fraud.lost_stolen import LostStolen
 from sentinel.simulator.fraud.payshap_drain import PayShapDrain
 from sentinel.simulator.fraud.planning import FraudSettings, episode_count, plan_episodes
 from sentinel.simulator.fraud.reports import plan_card_block, plan_reported_at
+from sentinel.simulator.fraud.supplier_mandate import (
+    PayeeHijack,
+    SupplierMandate,
+    SupplierMandateEpisode,
+)
 from sentinel.simulator.identifiers import IdSequence
 from sentinel.simulator.ledger import Ledger
 from sentinel.simulator.payee_changes import (
@@ -227,12 +232,16 @@ class _CustomerPlan:
 
 @dataclass(slots=True)
 class _FraudPlan:
-    """Fraud episodes and the card blocks their reports trigger, by SA day."""
+    """Fraud episodes and what their reports trigger: card blocks and payee fixes, by SA day."""
 
     ground_truth: GroundTruth
     episodes_by_day: dict[date, list[Episode]] = field(default_factory=lambda: defaultdict(list))
     blocks_by_day: dict[date, list[CardBlock]] = field(default_factory=lambda: defaultdict(list))
     unusable_from: dict[str, datetime] = field(default_factory=dict)  # card ID -> lost or blocked
+    hijacks: dict[str, PayeeHijack] = field(default_factory=dict)  # by beneficiary ID
+    restores_by_day: dict[date, list[tuple[SupplierMandateEpisode, datetime]]] = field(
+        default_factory=lambda: defaultdict(list)
+    )
 
 
 @dataclass(slots=True)
@@ -260,6 +269,7 @@ def fraud_scenarios(
         AppScam(FraudType.APP_VISHING, ids, transfer_groups),
         AppScam(FraudType.APP_REMOTE_ACCESS, ids, transfer_groups),
         PayShapDrain(ids, transfer_groups),
+        SupplierMandate(ids),
     ]
 
 
@@ -417,6 +427,13 @@ class _Simulation:
                 plan.blocks_by_day[to_sast(block.blocked_at).date()].append(block)
                 loss = episode.card_loss
                 plan.unusable_from[block.card_id] = loss.lost_at if loss else block.blocked_at
+
+            if isinstance(episode, SupplierMandateEpisode):
+                hijack = episode.hijack(reported_at)
+                plan.hijacks[hijack.beneficiary_id] = hijack
+                if reported_at is not None:
+                    restore_day = to_sast(reported_at).date()
+                    plan.restores_by_day[restore_day].append((episode, reported_at))
         return plan
 
     def _plan_customer(
@@ -461,13 +478,19 @@ class _Simulation:
         self._issue_replacements(day)
         for plan in self._plans:
             self._customer_day(plan, day, output)
-        output.planned = [item for item in output.planned if self._owner_can_use(item)]
+        output.planned = [
+            self._misdirected(item) for item in output.planned if self._owner_can_use(item)
+        ]
         output.planned += self._fraud.blocks_by_day.get(day, [])
         for episode in self._fraud.episodes_by_day.get(day, []):
             actions = episode.act(day, self._ledger)
             output.planned += actions.genuine
             output.planned += [_FraudAttempt(episode.scenario_id, a) for a in actions.attempts]
             self._emit_identity_events(episode.scenario_id, actions)
+        for mandate, reported_at in self._fraud.restores_by_day.get(day, []):
+            session, event = mandate.restore(reported_at)
+            output.sessions.append(session)
+            output.beneficiary_events.append(event)
 
         sessions = self._note_remote_access(output.sessions)
         self._emit(HistoryTable.LOGIN_SESSION, sessions)
@@ -515,6 +538,16 @@ class _Simulation:
             return False
         issued_at = self._issued_at.get(item.card_id)
         return issued_at is None or item.event_time >= issued_at
+
+    def _misdirected(self, item: _Planned) -> _Planned:
+        """A business's own payment to a hijacked supplier lands at the fraudster: fraud."""
+        if not isinstance(item, PlannedPayment):
+            return item
+        payee_id, paid_at = item.debit.beneficiary_id, item.debit.event_time
+        hijack = self._fraud.hijacks.get(payee_id) if payee_id else None
+        if hijack is None or not hijack.misdirects(payee_id, paid_at):
+            return item
+        return _FraudAttempt(hijack.scenario_id, item)
 
     def _customer_day(self, plan: _CustomerPlan, day: date, output: _DayOutput) -> None:
         rng = self._rng
@@ -585,7 +618,9 @@ class _Simulation:
             self._new_payee(plan, customer, event, budget, output)
             return
         edit_payee = change_payee_details if isinstance(event, PayeeDetailsChange) else delete_payee
-        edit = edit_payee(self._rng, customer, plan.payments, self._event_ids, event.day)
+        # Payees a fraud episode redirects are left alone, so its change and fix stay consistent.
+        held = self._fraud.hijacks.keys()
+        edit = edit_payee(self._rng, customer, plan.payments, self._event_ids, event.day, held)
         if edit is None:
             return
         plan.payments = replace(plan.payments, beneficiaries=edit.payees)
