@@ -254,7 +254,7 @@ class AccountTakeover:
         logged_in_at = swapped_at + _seconds(rng, DEVICE_AFTER_SWAP_SECONDS)
         midnight = _midnight_after(logged_in_at)
         comeback = midnight + _seconds(rng, MIDNIGHT_ROUND_SECONDS)
-        city = _fraudster_city(rng, customer.home_city)
+        city = fraudster_city(rng, customer.home_city)
         payee_count = rng.randint(*NEW_PAYEES)
         return AccountTakeoverEpisode(
             scenario_id=scenario_id,
@@ -302,7 +302,7 @@ def _swap_time(rng: random.Random, first_day: date) -> datetime:
     return random_datetime_between(rng, start, end).astimezone(UTC)
 
 
-def _fraudster_city(rng: random.Random, home_city: str) -> City:
+def fraudster_city(rng: random.Random, home_city: str) -> City:
     """A big city where the fraudster goes unnoticed, never the victim's own."""
     cities = [c for c in CITIES if c.name in FRAUDSTER_CITIES and c.name != home_city]
     return pick(rng, {city: city.weight for city in cities})
