@@ -6,7 +6,6 @@ fraudster. SABRIC 2025 gives the average claim by channel (app R17,400, internet
 R7,000) but not the steps, so the shape below is the usual pattern and a simulation assumption.
 """
 
-import itertools
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -24,14 +23,10 @@ from sentinel.simulator.beneficiaries import PERSONAL_PAYEE_NAMES
 from sentinel.simulator.fraud.cash_out import Round
 from sentinel.simulator.fraud.episodes import Balances, FraudActions, ParamValue, Victim
 from sentinel.simulator.fraud.lost_stolen import MIDNIGHT_ROUND_SECONDS
+from sentinel.simulator.fraud.payouts import split, sweep_into_main, whole_rands
 from sentinel.simulator.geography import CITIES, City
 from sentinel.simulator.identifiers import IdSequence
-from sentinel.simulator.payments import (
-    PAYMENT_DELAY_SECONDS,
-    PlannedPayment,
-    own_transfer,
-    payee_payment,
-)
+from sentinel.simulator.payments import PlannedPayment, payee_payment
 from sentinel.simulator.randomness import chance, pick, random_datetime_between
 from sentinel.simulator.sessions import CHANNEL_BY_PLATFORM, devices_linked_by, start_session
 from sentinel.simulator.unusual_events import (
@@ -65,7 +60,6 @@ FRAUDSTER_CITIES = frozenset({"Johannesburg", "Pretoria", "Durban", "Cape Town"}
 NEW_PAYEES = (1, 3)
 PAYMENT_GAP_SECONDS = (60, 300)
 MIN_LEFT_CENTS = 50_000  # R500; less isn't worth logging in again for
-RAND_CENTS = 100  # the fraudster types whole rands
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,28 +180,9 @@ class AccountTakeoverEpisode:
     def _sweep(
         self, rng: random.Random, session: LoginSession, balances: Balances
     ) -> tuple[list[PlannedPayment], int]:
-        """Move the savings, then what the credit card has left, into the main account.
-
-        Returns the transfers and how much the main account will then hold.
-        """
+        """Move all the savings, then what the credit card has left, into the main account."""
         habits = self.victim.payments
-        main = habits.main_account
-        budget = balances.available_cents(main.account_id)
-        moment = session.started_at
-        transfers: list[PlannedPayment] = []
-        for source in (habits.savings_account, habits.credit_account):
-            if source is None:
-                continue
-            available = balances.available_cents(source.account_id)
-            amount = _whole_rands(min(available, source.daily_transfer_limit_cents))
-            if amount <= 0:
-                continue
-            moment = _after(rng, moment, PAYMENT_DELAY_SECONDS)
-            transfers.append(
-                own_transfer(self.transfer_groups, session, source, main, amount, moment)
-            )
-            budget += amount
-        return transfers, budget
+        return sweep_into_main(rng, self.transfer_groups, habits, session, balances, whole_rands)
 
     def _pay_out(
         self,
@@ -224,7 +199,7 @@ class AccountTakeoverEpisode:
         eft = min(budget - payshap, main.daily_transfer_limit_cents)
         payouts: list[PlannedPayment] = []
         for channel, total in ((Channel.PAYSHAP, payshap), (Channel.EFT, eft)):
-            for payee, amount in zip(payees, _split(rng, total, len(payees)), strict=False):
+            for payee, amount in zip(payees, split(rng, total, len(payees)), strict=False):
                 moment = _after(rng, moment, PAYMENT_GAP_SECONDS)
                 if moment >= spree.end:
                     return payouts  # the rest waits until the limits reset
@@ -331,20 +306,6 @@ def _fraudster_city(rng: random.Random, home_city: str) -> City:
     """A big city where the fraudster goes unnoticed, never the victim's own."""
     cities = [c for c in CITIES if c.name in FRAUDSTER_CITIES and c.name != home_city]
     return pick(rng, {city: city.weight for city in cities})
-
-
-def _split(rng: random.Random, total_cents: int, parts: int) -> list[int]:
-    """Random whole-rand shares of ``total_cents``, at most ``parts`` of them, none empty."""
-    rands = total_cents // RAND_CENTS
-    parts = min(parts, rands)
-    if parts < 1:
-        return []
-    cuts = sorted(rng.sample(range(1, rands), parts - 1))
-    return [(end - start) * RAND_CENTS for start, end in itertools.pairwise([0, *cuts, rands])]
-
-
-def _whole_rands(cents: int) -> int:
-    return cents // RAND_CENTS * RAND_CENTS
 
 
 def _last_time(transfers: Sequence[PlannedPayment], default: datetime) -> datetime:

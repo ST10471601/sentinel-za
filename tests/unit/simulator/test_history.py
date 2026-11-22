@@ -68,6 +68,8 @@ INJECTED_FRAUD_TYPES = {
     FraudType.CARD_PRESENT_LOST_STOLEN,
     FraudType.CARD_PRESENT_COUNTERFEIT,
     FraudType.SIM_SWAP_TAKEOVER,
+    FraudType.APP_VISHING,
+    FraudType.APP_REMOTE_ACCESS,
 }
 CARD_AND_PIN_FRAUD_TYPES = {FraudType.CARD_PRESENT_LOST_STOLEN, FraudType.CARD_PRESENT_COUNTERFEIT}
 BLOCK_EVENTS = {CardEventType.BLOCKED, CardEventType.REPORTED_LOST}
@@ -920,7 +922,11 @@ def test_a_takeovers_devices_and_payees_join_back_to_its_logins(
         for e in real_takeover_run.beneficiary_events()
         if e.session_id in scenario_by_session
     }
-    fraud_ids = {label.transaction_id for label in real_takeover_run.labels() if label.is_fraud}
+    fraud_ids = {
+        label.transaction_id
+        for label in real_takeover_run.labels()
+        if label.scenario_id in episodes
+    }
     paid = {
         t.beneficiary_id
         for t in real_takeover_run.transactions()
